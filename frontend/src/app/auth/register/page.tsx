@@ -3,8 +3,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, ApiRequestError } from "@/lib/api";
-import { setTokenPair } from "@/lib/auth";
-import type { TokenPair } from "@/types";
+import { setAccessToken } from "@/lib/auth";
+import type { AccessTokenResponse } from "@/types";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -32,12 +32,12 @@ export default function RegisterPage() {
       // Register
       await api.post("/api/v1/auth/register", { email, password }, { skipAuth: true });
       // Auto-login
-      const tokens = await api.post<TokenPair>(
+      const tokens = await api.post<AccessTokenResponse>(
         "/api/v1/auth/login",
         { email, password },
         { skipAuth: true }
       );
-      setTokenPair(tokens.access_token, tokens.refresh_token);
+      setAccessToken(tokens.access_token);
       router.push("/dashboard");
     } catch (err) {
       if (err instanceof ApiRequestError) {
