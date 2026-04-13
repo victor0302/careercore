@@ -10,7 +10,7 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
 
 ALGORITHM = "HS256"
 TOKEN_TYPE_ACCESS = "access"

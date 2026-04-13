@@ -2,14 +2,23 @@
 
 import uuid
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
-
-from app.models.user import UserTier
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_strength(cls, value: str) -> str:
+        if not any(ch.islower() for ch in value):
+            raise ValueError("Password must include at least one lowercase letter.")
+        if not any(ch.isupper() for ch in value):
+            raise ValueError("Password must include at least one uppercase letter.")
+        if not any(ch.isdigit() for ch in value):
+            raise ValueError("Password must include at least one number.")
+        return value
 
 
 class UserLogin(BaseModel):
@@ -22,8 +31,6 @@ class UserRead(BaseModel):
 
     id: uuid.UUID
     email: str
-    is_active: bool
-    tier: UserTier
 
 
 class TokenPair(BaseModel):
