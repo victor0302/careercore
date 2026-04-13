@@ -1,9 +1,16 @@
 """Pydantic models for all AI provider inputs and outputs."""
 
 import uuid
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field
+
+RequirementCategory: TypeAlias = Literal["skill", "experience", "education", "tool", "domain"]
+ProfileEntityType: TypeAlias = Literal["work_experience", "project"]
+EvidenceSourceType: TypeAlias = Literal[
+    "profile", "work_experience", "project", "skill", "certification"
+]
+RecommendationActionType: TypeAlias = Literal["learn", "project", "certification", "reframe"]
 
 
 # ── Job Description Parsing ───────────────────────────────────────────────────
@@ -14,7 +21,7 @@ class JobRequirementItem(BaseModel):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4)
     text: str
-    category: str  # e.g. "skill", "experience", "education", "tool", "domain"
+    category: RequirementCategory
     is_required: bool = True  # False = nice-to-have
 
 
@@ -33,7 +40,7 @@ class ParsedJD(BaseModel):
 class BulletContext(BaseModel):
     """Context for generating a single resume bullet."""
 
-    profile_entity_type: str  # "work_experience" | "project"
+    profile_entity_type: ProfileEntityType
     profile_entity_id: uuid.UUID
     entity_summary: str  # Natural-language summary of the entity
     target_requirement: JobRequirementItem
@@ -43,7 +50,7 @@ class GeneratedBullet(BaseModel):
     """A single AI-generated resume bullet."""
 
     text: str
-    evidence_entity_type: str
+    evidence_entity_type: ProfileEntityType
     evidence_entity_id: uuid.UUID
     confidence: float = Field(ge=0.0, le=1.0)
 
@@ -86,7 +93,7 @@ class RecommendationContext(BaseModel):
     """A single actionable recommendation."""
 
     requirement: JobRequirementItem
-    action_type: str  # "learn", "project", "certification", "reframe"
+    action_type: RecommendationActionType
     action_description: str
     estimated_effort: str | None = None  # e.g. "2-4 weeks"
     resources: list[str] = Field(default_factory=list)
@@ -113,4 +120,4 @@ class FollowUpAnswer(BaseModel):
     """AI answer to a follow-up question."""
 
     answer: str
-    sources: list[str] = Field(default_factory=list)  # entity types referenced
+    sources: list[EvidenceSourceType] = Field(default_factory=list)
