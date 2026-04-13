@@ -1,0 +1,775 @@
+# CareerCore — Engineering Notes
+
+_Written as a reference for understanding every structural and architectural decision
+made in the Phase 1 scaffold. Read this once before writing your first line of
+application logic._
+
+---
+
+## How to read this document
+
+Each section answers one question: **why does this exist, and why does it look
+the way it does?** The goal is not to describe what a file does — you can read
+the code for that. The goal is to explain the reasoning behind every decision,
+so you can make consistent choices when adding new code.
+
+---
+
+## 1. Top-level layout
+
+```
+careercore/
+├── backend/
+├── frontend/
+├── cli/
+├── infra/
+├── docs/
+└── .github/
+```
+
+**Why a monorepo?**
+
+A monorepo means one `git clone`, one PR, one CI run. For a small team (or solo
+capstone project), the overhead of managing multiple repos — syncing schemas,
+coordinating releases, juggling separate CI configs — is not worth it. When you
+change a Pydantic schema in the backend, you update the matching TypeScript
+interface in the same commit and the reviewer sees both changes at once.
+
+The tradeoff is that CI takes longer because it runs both backend and frontend
+checks on every PR. That is acceptable here, and mitigated by running jobs in
+parallel and only running Docker builds after tests pass.
+
+**Why separate `backend/`, `frontend/`, `cli/`, `infra/`?**
+
+Each directory is a deployable unit with its own runtime, dependencies, and
+Dockerfile. They are co-located for convenience, not because they share code.
+No Python is imported by the frontend. No TypeScript is imported by the backend.
+This boundary is enforced by the fact that they are completely different
+language runtimes.
+
+`docs/` is not a deployable unit — it is the design corpus. Keeping it in the
+repo means design decisions travel with the code, are versioned, and appear in
+PRs when updated.
+
+`infra/` contains Terraform and helper scripts. It is separate from `backend/`
+because infrastructure configuration has a different change cadence and a
+different audience (ops vs. developers). You do not want a backend developer
+accidentally running `terraform apply` while fixing a bug.
+
+---
+
+## 2. `.env.example` and secrets discipline
+
+**Why does `.env.example` exist at all?**
+
+It is the single source of truth for every environment variable the application
+needs. When a new developer joins, they run `cp .env.example .env` and know
+exactly what to fill in. When a new variable is added, the `.env.example` must
+be updated in the same PR — otherwise the next person to pull will have a
+broken environment with no error message that explains why.
+
+**Why not just document variables in the README?**
+
+Because README docs go stale. A file that is `cp`'d and sourced by the
+application is automatically correct. If you add a variable to the code but
+forget to add it to `.env.example`, CI will catch it because the CI environment
+only has what is in `.env.example`.
+
+**Why are there comments and example (non-secret) values?**
+
+Because a field called `JWT_SECRET_KEY=` with no comment is useless. The
+comment says how to generate a valid value. The example value shows the format.
+This is the difference between a config file that helps people and one that
+frustrates them.
+
+**The rule:** Nothing in `.env.example` should ever be a real secret. Strings
+like `sk-ant-replace-me` are obviously placeholders. `minioadmin` is the MinIO
+default and is safe to commit because it only works on a local MinIO instance
+with no internet exposure.
+
+---
+
+## 3. `docker-compose.yml` design
+
+**Service topology:**
+
+```
+frontend (3000) ─┐
+backend  (8000) ─┤── careercore-net (bridge)
+worker          ─┤
+db     (internal)┤
+redis  (internal)┤
+storage (9000)  ─┘
+storage_init    ──► exits after bucket creation
+```
+
+**Why is `db` not exposed to the host?**
+
+PostgreSQL should never be directly reachable from outside the Docker network.
+In local development it seems convenient, but it creates a habit of connecting
+to production databases directly, which is dangerous. If you need to inspect the
+database, use `docker compose exec db psql` or a tunneled connection.
+
+**Why `depends_on` with `condition: service_healthy`?**
+
+Without health checks, Docker Compose starts services in dependency order but
+does not wait for them to be ready. The backend starting before Postgres is
+ready will crash with a connection error on its first DB query. `service_healthy`
+means "wait until the health check passes" — which for Postgres means
+`pg_isready` returns success, i.e., it is actually accepting connections.
+
+**Why a separate `storage_init` service?**
+
+MinIO starts without any buckets. The application assumes the bucket exists.
+Rather than adding bucket-creation code to the backend startup (which would
+couple application code to infrastructure concerns), we use a one-shot
+`mc` (MinIO client) container that creates the bucket and exits. This is the
+same pattern used by `db-migrate` containers in production deployments —
+a disposable init job that runs once.
+
+**Why `worker` depends on `backend` and not directly on `db` + `redis`?**
+
+The Celery worker imports the same application code as the backend. If the
+backend starts successfully, it means the dependencies (config, models, etc.)
+are importable. This is a soft dependency, not a technical one — in production
+you would depend on `db` and `redis` directly. But for local dev it is simpler.
+
+**Why named volumes instead of bind mounts for db/redis/minio?**
+
+Named volumes (`postgres_data`, `redis_data`, `minio_data`) survive
+`docker compose down` but are removed by `docker compose down -v`. This means
+your local database persists across restarts (useful for development) but you
+can nuke it intentionally. Bind mounts (e.g., `./data/postgres:/var/lib/...`)
+would work too, but they create directories in your repo that get accidentally
+committed or have permission issues on different OSes.
+
+---
+
+## 4. GitHub Actions workflow architecture
+
+**`ci.yml` — ordered by fail-fast cost**
+
+```
+lint-python → typecheck-python → test-backend
+lint-frontend → typecheck-frontend → test-frontend
+security-scan
+docker-build (only runs after test-backend + test-frontend)
+```
+
+Jobs run in this order intentionally. Lint fails in seconds and is cheap to
+run first. Type checking is slower but catches structural errors before you spin
+up test databases. Tests are slowest and require service containers. Docker
+builds are the most expensive and only run when tests pass.
+
+`AI_PROVIDER=mock` is set at the workflow level, not inside individual jobs.
+This ensures no job can accidentally call a real AI API, regardless of what
+`secrets.ANTHROPIC_API_KEY` is set to.
+
+**`cd.yml` — push to main only**
+
+CD only triggers on `push` to `main`, not on `pull_request`. This is the
+standard separation: CI validates PRs, CD deploys merges. The deploy job uses
+`environment: development` which maps to a GitHub environment with its own
+secrets and protection rules. You can add a required reviewer to the `production`
+environment later.
+
+**`security.yml` — scheduled, not per-PR**
+
+Dependency audits and image scans run weekly rather than on every PR because:
+1. New vulnerabilities are discovered continuously — a PR that was clean
+   yesterday might be flagged today through no change of your own.
+2. Full dependency audits are slow and the results are the same whether you run
+   them 50 times per day or once per week.
+3. `gitleaks` with `fetch-depth: 0` scans the full git history and is expensive.
+   You want it on a schedule, not on every commit.
+
+---
+
+## 5. Backend structure deep-dive
+
+### 5.1 `app/` layout
+
+```
+app/
+├── main.py          — FastAPI app factory + lifespan
+├── core/            — Config, security, dependency injection
+├── db/              — SQLAlchemy engine + session + base models
+├── models/          — Database table definitions (SQLAlchemy ORM)
+├── schemas/         — API request/response shapes (Pydantic)
+├── ai/              — AI provider abstraction layer
+├── services/        — Business logic (no HTTP concerns)
+├── api/             — HTTP routing + endpoint handlers
+└── workers/         — Celery app + async task definitions
+```
+
+**Why separate `models/` from `schemas/`?**
+
+This is one of the most important structural decisions in a FastAPI app.
+
+`models/` contains SQLAlchemy classes — they define what is in the database.
+They have relationships, lazy-loading behavior, and SQLAlchemy-specific types.
+
+`schemas/` contains Pydantic classes — they define what the API accepts and
+returns. They are serializable, validated, and independent of the database.
+
+They are not the same thing, even when they look similar. A SQLAlchemy `User`
+model has a `password_hash` field. The Pydantic `UserRead` schema does not —
+you never send a password hash over the wire. A `WorkExperience` model has
+relationships to `Profile` and `UploadedFile`. The `WorkExperienceRead` schema
+has `profile_id: uuid.UUID` — a simple foreign key value, not a nested object.
+
+If you merge them (as some tutorials do), you end up with schemas that leak
+internal fields, relationships that cause N+1 queries when serialized, and
+circular import nightmares. Keep them separate.
+
+**Why `services/` instead of putting logic in endpoints?**
+
+Services are where business logic lives. Endpoints are where HTTP contracts are
+defined. Mixing them means you cannot test business logic without spinning up
+an HTTP server, and it becomes impossible to reuse logic across endpoints
+(e.g., `auth_service.register()` is called from the REST endpoint today, and
+from a CLI command in Phase 2).
+
+The pattern is:
+```
+endpoint receives HTTP request
+→ validates input with Pydantic schema
+→ delegates to service
+→ service does business logic
+→ service uses models (DB) and AI provider as needed
+→ returns domain object or raises domain exception
+→ endpoint converts to HTTP response or maps exception to HTTP status code
+```
+
+This separation means:
+- Services are unit-testable without HTTP overhead
+- Endpoints stay thin and readable
+- Business logic is reusable from CLI, Celery tasks, or other services
+
+### 5.2 `app/core/`
+
+**`config.py` — pydantic-settings singleton**
+
+`Settings` reads from environment variables. `@lru_cache` means the Settings
+object is constructed exactly once per process. Every import of `get_settings()`
+returns the same object — no repeated env reads, no repeated validation.
+
+Why `lru_cache` instead of a module-level global? Because module-level globals
+are instantiated at import time, which breaks tests that need to override env
+vars before importing the module. With `lru_cache`, you can `get_settings.cache_clear()`
+in test setup and the next call reads fresh env vars.
+
+**`security.py` — pure functions, no state**
+
+Security functions (hashing, JWT creation/validation) are pure functions with
+no side effects and no database access. This makes them trivially testable and
+reusable. Notice they do not import anything from `app.db` or `app.models` —
+that would be a layering violation.
+
+**`dependencies.py` — FastAPI dependency injection**
+
+`get_current_user` is the authentication gate for every protected endpoint.
+It is implemented as a FastAPI dependency (not middleware) because:
+1. It yields the authenticated user object into the endpoint's scope
+2. Individual endpoints can opt out by simply not declaring it as a parameter
+3. It integrates with FastAPI's OpenAPI generation (shows the padlock in /docs)
+4. It is testable by overriding with `app.dependency_overrides`
+
+The function raises `HTTP 401` with `WWW-Authenticate: Bearer` header — this is
+the correct response per RFC 6750. Do not return 403 for missing/invalid tokens;
+403 means "authenticated but not authorized."
+
+### 5.3 `app/db/`
+
+**`base.py` — mixins over inheritance chains**
+
+`UUIDPrimaryKeyMixin` and `TimestampMixin` are Python mixins, not a base class
+with all functionality. Every model gets a UUID primary key and `created_at`/
+`updated_at` timestamps — but through composition, not deep inheritance.
+
+Why UUIDs instead of auto-increment integers?
+
+- UUIDs are globally unique — you can generate them before inserting, which
+  simplifies multi-step operations and event sourcing.
+- They do not leak information about record count or insert order.
+- They work across distributed systems without coordination.
+- They make it harder to IDOR (insecure direct object reference) — guessing
+  `/jobs/1`, `/jobs/2`, `/jobs/3` is trivially easy with integers.
+
+Why `server_default=func.gen_random_uuid()` in addition to `default=uuid.uuid4`?
+
+The Python `default` fires when you create an object in Python code. The
+`server_default` fires when you insert a row with a raw SQL statement (e.g.,
+in a data migration or a test seed script). Both should produce UUIDs.
+
+**`session.py` — async engine with proper lifecycle**
+
+`get_db` is a generator that yields a session and commits or rolls back when
+done. The `try/except/finally` block ensures:
+- Success path: commit happens automatically (no need to call `await db.commit()`
+  in every endpoint)
+- Error path: rollback happens automatically (prevents dirty state from leaking
+  into the next request)
+- Always: session is closed (prevents connection pool exhaustion)
+
+`pool_pre_ping=True` means SQLAlchemy sends a `SELECT 1` before using a pooled
+connection. Without this, a stale connection (dropped by the DB after being idle)
+will cause the first query in a request to fail.
+
+### 5.4 `app/models/` — 13 model files
+
+**Why one model per file, not all in one file?**
+
+At 13 models, a single `models.py` file would be 600+ lines. More importantly,
+relationships between models create circular dependencies when everything is in
+one file. The solution used here is:
+1. Each model file imports only what it needs at the top
+2. Forward-reference strings (`"Profile"`, `"User"`) break import-time circular
+   deps for `relationship()`
+3. Bottom-of-file imports bring in the referenced models so Python can resolve
+   the strings at runtime
+
+This is the standard pattern for SQLAlchemy models in large applications.
+
+**Why `__init__.py` imports all models?**
+
+Alembic's `env.py` imports `app.models` (the package). For Alembic to detect
+all tables and generate correct migrations, every model class must be imported
+before `Base.metadata` is inspected. The `__init__.py` does exactly that —
+one import statement in `env.py` causes all 13 models to be registered.
+
+If you add a new model and forget to add it to `__init__.py`, Alembic will not
+know it exists and will not generate a migration for it. This is a common
+mistake — the `__init__.py` is the registration mechanism.
+
+**`ai_call_log.py` — why no FK to User?**
+
+`AICallLog.user_id` is not a foreign key. This is intentional. If a user
+deletes their account, their AI call logs must be retained for billing, auditing,
+and fraud detection. A foreign key with `ON DELETE CASCADE` would destroy that
+history. A foreign key with `ON DELETE SET NULL` would lose the user association.
+Not having a foreign key means the log is a fact about an event that happened
+— it does not depend on the continued existence of the user.
+
+**`audit_log.py` — the append-only table**
+
+The audit log is the most important table in the system from a compliance
+perspective. It records everything that changed, who changed it, and when.
+Two rules apply:
+1. No `UPDATE` or `DELETE` statements on this table — ever. Application code
+   must not have this capability.
+2. Every state-changing operation (create, update, delete, login, upload)
+   must write to this table via `AuditService.log_event()`.
+
+The enforcement mechanism is code review + the `AuditService` abstraction.
+In Phase 2, add a Postgres role with `INSERT`-only permissions on `audit_logs`
+and use that role for the application connection.
+
+### 5.5 `app/ai/` — the provider abstraction
+
+**Why a `Protocol` instead of an abstract base class?**
+
+Python's `Protocol` (from `typing`) enables structural subtyping — "duck typing
+with type checking." Any class that implements the required methods satisfies
+the protocol, without inheriting from it. This means:
+
+- `MockAIProvider` does not need to import `AIProvider` to satisfy it
+- Third-party AI client classes could satisfy it without modification
+- `isinstance(obj, AIProvider)` works at runtime because of `runtime_checkable`
+
+An abstract base class (ABC) would require every provider to inherit from it,
+creating coupling between the interface and the implementation. A Protocol
+decouples them.
+
+**Why four providers when only two work?**
+
+The provider enum already encodes the roadmap: `mock` → `anthropic` (Phase 1),
+`openai_compatible` (Phase 2), `ollama` (Phase 3). The stubs exist so that:
+1. The interface is stable — adding a new provider means implementing methods,
+   not changing the interface
+2. Phase 2 and Phase 3 contributors know exactly what they need to implement
+3. `get_ai_provider()` can be extended without refactoring call sites
+
+**Why `lru_cache` on `get_ai_provider()`?**
+
+The provider is stateful (it holds an HTTP client). You want one instance per
+process, not one per request. `lru_cache(maxsize=1)` gives you a singleton
+without a global variable.
+
+**Model selection in `AnthropicProvider`:**
+
+- `parse_job_description` and `explain_score` use Haiku (fast, cheap, structured
+  output tasks)
+- `generate_bullets`, `answer_followup`, `generate_recommendations`,
+  `generate_learning_plan` use Sonnet (higher reasoning quality, longer context)
+
+This is a deliberate cost/quality tradeoff. Parsing a JD into JSON is a simple
+extraction task — Haiku handles it correctly at 12× lower cost than Sonnet.
+Generating resume bullets requires nuance, evidence selection, and writing
+quality — Sonnet earns its cost here.
+
+**`ai/schemas.py` vs `schemas/`:**
+
+`schemas/` contains API-facing Pydantic models — what the HTTP endpoints accept
+and return. `ai/schemas.py` contains AI-internal Pydantic models — the typed
+contracts between the services and the AI provider. These are never serialized
+to HTTP responses directly; they are intermediate data structures. Keeping them
+in `ai/` scopes them correctly.
+
+### 5.6 `app/services/`
+
+**`scoring_service.py` — the most important service**
+
+The scoring service is intentionally deterministic. It never calls an LLM.
+This matters for several reasons:
+
+1. **Testability:** Deterministic logic can be exhaustively unit tested. LLM
+   calls cannot — the output varies by model version, temperature, and prompt.
+2. **Cost:** Scoring happens on every analysis. If scoring required an LLM call,
+   every job analysis would consume tokens just to get a number.
+3. **Explainability:** A weighted formula with an evidence map is auditable.
+   "You scored 72/100 because you matched 7/10 skill requirements, 2/5
+   experience requirements..." is something a user can understand and contest.
+   An LLM-generated score is a black box.
+
+The weight formula (skills 35%, experience 20%, projects 20%, tools 10%,
+education 10%, bonus 5%) reflects the empirical reality of technical job
+screening: skills and experience dominate, projects demonstrate practical
+application, tools are a tiebreaker.
+
+**`ai_cost_service.py` — budget before every call**
+
+Every AI call has two mandatory bookends:
+```
+check_budget(user) → make AI call → log_call(...)
+```
+
+`check_budget` reads today's token usage from `ai_call_logs` and raises
+`BudgetExceededError` if the user is over their daily limit. This happens before
+the call — you do not want to make a $0.10 API call and then discover the user
+was over budget.
+
+`log_call` writes an `AICallLog` row after every call, success or failure. You
+need to log failures too — if the API is down and every call fails, you still
+want a record of the attempts for debugging.
+
+The TODO comment about Redis caching is important: querying the DB for token
+usage on every AI call is a N+1 problem at scale. The fix is to cache
+`(user_id, date)` → `total_tokens` in Redis with a TTL. Phase 1 uses the
+simpler DB query.
+
+**`audit_service.py` — the append gate**
+
+`AuditService.log_event()` is the only way application code should write to
+`audit_logs`. Calling `db.add(AuditLog(...))` directly in an endpoint is
+technically possible, but bypasses the service interface that future developers
+expect. By routing all writes through the service, you have one place to add
+enrichment (e.g., adding geolocation from the IP in Phase 2).
+
+Note that `log_event` calls `await db.flush()`, not `await db.commit()`. The
+caller owns the transaction. If the caller's operation fails and rolls back,
+the audit log entry rolls back too — which is correct, because a failed
+operation should not appear in the audit log.
+
+### 5.7 `app/api/v1/`
+
+**Why version the API at `/api/v1/`?**
+
+Because you will eventually need to change a response shape, rename a field,
+or restructure an endpoint in a way that would break existing clients. With
+versioning, you can keep `/api/v1/` stable and introduce `/api/v2/` alongside
+it, giving clients time to migrate.
+
+`/api/` as a prefix separates API routes from any future server-rendered pages
+or static files served from the same host.
+
+**Why `router.py` as an aggregator?**
+
+`main.py` should not know about individual endpoint modules. `router.py` is the
+single import point for all v1 routes. When you add a new endpoint file, you
+add one line to `router.py` and one test file — no other files change.
+
+**Endpoint ownership enforcement:**
+
+Every endpoint that accesses user data must verify ownership. The pattern is:
+```python
+# CORRECT: filter by both ID and user_id
+result = await db.execute(
+    select(Job).where(Job.id == job_id, Job.user_id == current_user.id)
+)
+# WRONG: only filter by ID — lets any authenticated user access any job
+result = await db.execute(select(Job).where(Job.id == job_id))
+```
+
+The second form is an IDOR vulnerability (Insecure Direct Object Reference).
+Every `get_for_user()` method in the service layer enforces this double filter.
+
+### 5.8 `app/workers/`
+
+**Why Celery for background tasks?**
+
+File text extraction is I/O-bound and can take 10-30 seconds for large PDFs.
+You do not want an HTTP request to block for 30 seconds. Celery offloads the
+work to a background worker process. The request returns immediately with
+`{"status": "pending"}`, and the client polls (or receives a webhook in Phase 2)
+when extraction is complete.
+
+**Two queues: `default` and `ai_tasks`**
+
+In Phase 2, AI-heavy tasks (bullet generation, job parsing) will go into
+`ai_tasks`. This allows you to scale AI workers independently from file
+extraction workers. A file extraction worker needs disk I/O capacity. An AI
+task worker needs network I/O capacity for API calls. Different bottlenecks →
+different scaling profiles.
+
+**`task_acks_late=True`**
+
+By default, Celery acknowledges (removes from queue) a task as soon as a worker
+picks it up. If the worker crashes mid-execution, the task is lost.
+`acks_late=True` means the task is only acknowledged after it completes
+successfully. If the worker crashes, the task returns to the queue and is
+retried. Essential for file extraction — you cannot lose a user's upload.
+
+### 5.9 `alembic/env.py`
+
+**Why async engine in Alembic?**
+
+The application uses async SQLAlchemy. Alembic's default `env.py` uses a sync
+engine. If you use a sync engine for migrations, you cannot use
+`asyncpg` as the driver (asyncpg is async-only). The solution is to run
+`asyncio.run(run_async_migrations())` in the online migration function —
+Alembic's sync wrapper calls an async function internally.
+
+**Why import `app.models` in `env.py`?**
+
+`Base.metadata` only contains table definitions for models that have been
+imported into the Python process. If you run `alembic autogenerate` without
+importing all models, it will see an empty metadata and generate a migration
+that drops all your tables (because it thinks they are "extra" tables not in
+the metadata). The `import app.models` line triggers the side-effect imports
+that populate the metadata.
+
+### 5.10 `tests/conftest.py`
+
+**Why SQLite for unit tests?**
+
+PostgreSQL-specific tests (integration tests) require a running PostgreSQL
+instance. For pure unit tests (testing scoring logic, auth service, etc.),
+SQLite in-memory is faster to start, requires no external services, and is
+destroyed after each test. This lets you run the unit test suite offline, in
+CI without service containers, or on a slow laptop.
+
+The tradeoff: SQLite does not support JSONB, ARRAY, or some PostgreSQL-specific
+constraints. Unit tests that involve those column types need to use PostgreSQL.
+The conftest is designed to switch: set `DATABASE_URL` to a PostgreSQL URL for
+integration tests.
+
+**Why `scope="session"` for `test_engine` but no scope for `db`?**
+
+The engine (connection pool setup) is created once per test session — expensive
+to recreate. The session is created per test with a rollback at the end — cheap,
+and it ensures test isolation. Each test gets a clean slice of the database
+because the rollback undoes all inserts, updates, and deletes made during
+that test.
+
+**`app.dependency_overrides` — the correct way to mock in FastAPI tests**
+
+FastAPI's dependency injection system is designed for testability. Instead of
+monkey-patching, you replace the dependency function directly:
+```python
+app.dependency_overrides[get_db] = lambda: db
+app.dependency_overrides[get_ai_provider] = lambda: MockAIProvider()
+```
+
+After the test, `app.dependency_overrides.clear()` restores the originals.
+This is cleaner than mocking because it works the same way in tests as in
+production — the dependency system is exercised, not bypassed.
+
+---
+
+## 6. Frontend structure
+
+```
+src/
+├── app/          — Next.js App Router pages (route = file system path)
+├── components/   — Reusable UI components
+├── hooks/        — Custom React hooks (encapsulate stateful logic)
+├── lib/          — Pure utility functions (api client, auth helpers)
+└── types/        — TypeScript interfaces shared across the app
+```
+
+**Why App Router (Next.js 14) instead of Pages Router?**
+
+App Router is the current direction of Next.js. It enables:
+- React Server Components (no client bundle for static content)
+- Nested layouts without prop drilling
+- Streaming and Suspense boundaries
+- Simpler data fetching patterns
+
+For a green-field project in 2026, using the Pages Router would be
+accumulating technical debt on day one.
+
+**`src/lib/api.ts` — the typed fetch wrapper**
+
+Every API call goes through `api.get()`, `api.post()`, etc. This means:
+1. The `Authorization: Bearer` header is attached in one place, not scattered
+   across 20 component files
+2. The 401 → refresh → retry logic is in one place
+3. `ApiRequestError` gives you a typed error class you can `instanceof` check
+4. Changing the base URL (e.g., for different environments) is one-line change
+
+Without this wrapper, you end up with `fetch(...)` calls in components that
+each handle authentication differently, or not at all.
+
+**`src/lib/auth.ts` — token storage isolated**
+
+All token reads and writes go through `getAccessToken()`, `setTokenPair()`,
+`clearTokens()`. If you later decide to move from localStorage to httpOnly
+cookies (the correct production approach), you change this one file. No
+component needs to know where tokens are stored.
+
+The `if (typeof window === "undefined") return null` guards are necessary
+because Next.js renders components server-side, where `localStorage` does not
+exist. Calling `localStorage.getItem()` on the server throws a ReferenceError.
+
+**`src/hooks/useAuth.ts`**
+
+`useAuth` encapsulates the "am I logged in?" state. Components that need the
+current user call `const { user, isAuthenticated } = useAuth()` rather than
+reading localStorage directly. This means:
+1. Auth state is centralized — one source of truth
+2. Components re-render when auth state changes (logout triggers redirect)
+3. The loading state prevents flash-of-unauthenticated-content
+
+**`src/types/index.ts` — TypeScript interfaces**
+
+These mirror the backend Pydantic schemas. They are not auto-generated (Phase 2
+could add `openapi-typescript` for that). Keeping them in one file makes them
+easy to keep in sync — when you change a backend schema, you grep for the
+corresponding interface and update it in the same PR.
+
+**Why TanStack Query?**
+
+TanStack Query handles the cache layer between the API and React components:
+- Deduplicates concurrent requests for the same data
+- Caches responses and serves them instantly on re-renders
+- Handles loading and error states with a consistent API
+- Provides background refetching so data stays fresh
+- Invalidates cache entries when mutations succeed
+
+The alternative — `useEffect` + `useState` + manual fetch — works but produces
+repetitive, error-prone code in every component that needs remote data.
+
+---
+
+## 7. CI/CD design decisions
+
+**Why `pip-audit` instead of Dependabot?**
+
+Dependabot opens PRs automatically. `pip-audit` in CI blocks the build if a
+vulnerability is found. Both are useful. `pip-audit` catches vulnerabilities
+that exist in the current codebase right now, not just new additions.
+
+**Why `gitleaks`?**
+
+Gitleaks scans git history for secrets. If a developer accidentally commits an
+API key and then makes a "remove secret" commit, the secret is still in the
+history. Gitleaks catches this. It runs on `fetch-depth: 0` (full history) in
+the scheduled scan, and on the PR's diff in CI.
+
+**Why Trivy for image scanning?**
+
+Trivy scans container images for known CVEs in the OS packages and language
+dependencies. An image built from `python:3.12-slim` might contain a vulnerable
+version of `openssl` or `zlib`. Trivy catches this before the image is deployed.
+
+---
+
+## 8. Security decisions
+
+**JWT access + refresh token split**
+
+Access tokens expire in 15 minutes. Refresh tokens expire in 7 days. This
+design means:
+- If an access token is stolen, the attacker has 15 minutes before it expires.
+- The frontend automatically refreshes before expiry — users do not get logged out.
+- If a refresh token is stolen (more serious), the user's password change or
+  logout invalidates it (Phase 2: store issued refresh tokens in Redis and
+  invalidate on use).
+
+**bcrypt for password hashing**
+
+bcrypt is the correct choice for password hashing in 2026. It is adaptive
+(cost factor can be increased as hardware improves), salted by design, and
+well-supported. Do not use SHA-256, MD5, or any non-adaptive hash for passwords.
+
+**Non-root containers**
+
+Both Dockerfiles create a user with UID 1001 and run the process as that user.
+If the container is compromised, the attacker runs as UID 1001, not root. On
+the host, UID 1001 has no special privileges. This does not prevent all attacks,
+but it is a meaningful reduction in blast radius.
+
+**Ownership checks on every endpoint**
+
+Every endpoint that reads or modifies user data filters by `user_id = current_user.id`.
+This prevents IDOR vulnerabilities where an authenticated user can access
+another user's data by guessing or enumerating UUIDs.
+
+---
+
+## 9. What is NOT in Phase 1 and why
+
+**Email verification:** Requires an email service (SES, SendGrid, etc.) and
+increases deployment complexity. Phase 1 assumes a trusted local environment.
+Add it before opening public registration.
+
+**Refresh token rotation (Redis-backed):** The current implementation issues
+new refresh tokens but does not invalidate old ones. This means a stolen refresh
+token remains valid until it expires. The fix (store issued tokens in Redis,
+invalidate on use) is documented as a TODO and is a Phase 2 requirement before
+production.
+
+**Rate limiting:** The API has no rate limiting. Add this via Redis-backed
+middleware (e.g., `slowapi`) before any public deployment. Without it, a single
+client can exhaust your AI token budget.
+
+**HTTPS termination:** The Compose setup exposes HTTP. Production requires TLS.
+Use a reverse proxy (Nginx, Caddy, or a cloud load balancer) to terminate TLS
+in front of the backend and frontend.
+
+**Pagination:** All list endpoints return all results. For small datasets this
+is fine. When a user has 200 job descriptions, you need `limit`/`offset` or
+cursor-based pagination. This should be added in the first real sprint.
+
+---
+
+## 10. The right way to add a new feature
+
+Following the existing patterns:
+
+1. **Add the model** in `app/models/your_model.py`. Import it in
+   `app/models/__init__.py`. Run `alembic revision --autogenerate`.
+
+2. **Add Pydantic schemas** in `app/schemas/your_schema.py` for API I/O.
+
+3. **Add a service** in `app/services/your_service.py` with async methods.
+   Business logic goes here, not in endpoints.
+
+4. **Add endpoints** in `app/api/v1/endpoints/your_endpoint.py`. Register
+   the router in `app/api/v1/router.py`.
+
+5. **Write tests** in `backend/tests/`. Unit tests for the service. Integration
+   tests (if needed) for the endpoint using the async client fixture.
+
+6. **Add TypeScript types** to `frontend/src/types/index.ts`.
+
+7. **Add API calls** to `frontend/src/lib/api.ts` or a domain-specific lib file.
+
+8. **Wire up the UI** in the appropriate page or component.
+
+Every new endpoint must:
+- Filter by `user_id = current_user.id` for owned resources
+- Write to the audit log for state-changing operations
+- Check `AICostService.check_budget()` before any AI call
+- Use `MockAIProvider` in all tests (`AI_PROVIDER=mock`)

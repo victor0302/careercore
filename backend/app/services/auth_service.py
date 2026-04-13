@@ -10,6 +10,7 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from app.models.profile import Profile
 from app.models.user import User
 from app.schemas.user import TokenPair, UserCreate
 
@@ -34,6 +35,11 @@ class AuthService:
         )
         self._db.add(user)
         await self._db.flush()
+
+        profile = Profile(user_id=user.id)
+        self._db.add(profile)
+        await self._db.flush()
+
         return user
 
     async def login(self, email: str, password: str) -> TokenPair:
