@@ -42,7 +42,7 @@ class AuthService:
 
         return user
 
-    async def login(self, email: str, password: str) -> TokenPair:
+    async def login(self, email: str, password: str) -> tuple[User, TokenPair]:
         """Verify credentials and return an access + refresh token pair.
 
         Raises AuthError if credentials are invalid or user is inactive.
@@ -55,7 +55,7 @@ class AuthService:
         if not user.is_active:
             raise AuthError("Account is disabled. Contact support.")
 
-        return TokenPair(
+        return user, TokenPair(
             access_token=create_access_token(str(user.id)),
             refresh_token=create_refresh_token(str(user.id)),
         )

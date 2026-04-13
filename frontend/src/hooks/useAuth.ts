@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiRequestError } from "@/lib/api";
-import { clearTokens, getAccessToken, setTokenPair } from "@/lib/auth";
-import type { TokenPair, User } from "@/types";
+import { clearTokens, getAccessToken, setAccessToken } from "@/lib/auth";
+import type { AccessTokenResponse, User } from "@/types";
 
 interface AuthState {
   user: User | null;
@@ -43,10 +43,10 @@ export function useAuth() {
   }, []);
 
   const login = useCallback(async (credentials: LoginCredentials): Promise<void> => {
-    const tokens = await api.post<TokenPair>("/api/v1/auth/login", credentials, {
+    const tokens = await api.post<AccessTokenResponse>("/api/v1/auth/login", credentials, {
       skipAuth: true,
     });
-    setTokenPair(tokens.access_token, tokens.refresh_token);
+    setAccessToken(tokens.access_token);
 
     const user = await api.get<User>("/api/v1/auth/me");
     setState({ user, isLoading: false, isAuthenticated: true });

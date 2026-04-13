@@ -1,14 +1,34 @@
 """Authentication endpoints — register, login, refresh."""
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.db.session import get_db
-from app.schemas.user import RefreshRequest, TokenPair, UserCreate, UserLogin, UserRead
+from app.schemas.user import (
+    AccessTokenResponse,
+    RefreshRequest,
+    UserCreate,
+    UserLogin,
+    UserRead,
+)
 from app.services.audit_service import AuditService
 from app.services.auth_service import AuthError, AuthService
 
 router = APIRouter()
+settings = get_settings()
+
+
+def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=settings.is_production,
+        samesite="lax",
+        max_age=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        path="/api/v1/auth",
+    )
 
 
 @router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
@@ -35,35 +55,53 @@ async def register(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
-@router.post("/login", response_model=TokenPair)
+@router.post("/login", response_model=AccessTokenResponse)
 async def login(
     data: UserLogin,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
-) -> TokenPair:
-    """Authenticate and return a JWT token pair."""
+) -> AccessTokenResponse:
+    """Authenticate and return an access token while setting a refresh cookie."""
     service = AuthService(db)
     audit = AuditService(db)
     try:
-        tokens = await service.login(data.email, data.password)
+        user, tokens = await service.login(data.email, data.password)
+        _set_refresh_cookie(response, tokens.refresh_token)
         await audit.log_event(
             action="user.login",
             ip_address=request.client.host if request.client else "unknown",
             user_agent=request.headers.get("user-agent", ""),
+            user_id=user.id,
+            entity_type="User",
+            entity_id=user.id,
         )
-        return tokens
+        return AccessTokenResponse(access_token=tokens.access_token)
     except AuthError as exc:
+        await audit.log_event(
+            action="user.login.failed",
+            ip_address=request.client.host if request.client else "unknown",
+            user_agent=request.headers.get("user-agent", ""),
+        )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
 
-@router.post("/refresh", response_model=TokenPair)
+@router.post("/refresh", response_model=AccessTokenResponse)
 async def refresh(
+    request: Request,
     body: RefreshRequest,
     db: AsyncSession = Depends(get_db),
-) -> TokenPair:
-    """Exchange a refresh token for a new token pair."""
+) -> AccessTokenResponse:
+    """Exchange a refresh token for a new access token."""
     service = AuthService(db)
+    refresh_token = body.refresh_token or request.cookies.get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token.",
+        )
     try:
-        return await service.refresh(body.refresh_token)
+        tokens = await service.refresh(refresh_token)
+        return AccessTokenResponse(access_token=tokens.access_token)
     except AuthError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
