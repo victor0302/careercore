@@ -1,0 +1,86 @@
+# ── Environment & Secrets ──────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+env/
+
+# Type / lint caches
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# Test / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.cover
+.hypothesis/
+
+# ── Node / Next.js ─────────────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+dist/
+.npm
+.eslintcache
+*.tsbuildinfo
+next-env.d.ts
+
+# ── Docker ─────────────────────────────────────────────────────────────────────
+# (docker-compose.override.yml is local only)
+docker-compose.override.yml
+
+# ── IDEs & OS ──────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Alembic ────────────────────────────────────────────────────────────────────
+# Keep versions/ tracked; ignore any local migration temp files
+*.pyc
+
+# ── Terraform ──────────────────────────────────────────────────────────────────
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+
+# ── Misc ───────────────────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak

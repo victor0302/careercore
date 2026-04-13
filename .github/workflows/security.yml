@@ -1,0 +1,78 @@
+name: Security Scan (Scheduled)
+
+on:
+  schedule:
+    # Every Monday at 08:00 UTC
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+jobs:
+  pip-audit:
+    name: pip-audit (full)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install and audit
+        run: |
+          pip install pip-audit
+          cd backend && pip install -e ".[dev]"
+          pip-audit --requirement <(pip freeze)
+
+  npm-audit:
+    name: npm audit (full)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install and audit
+        run: |
+          cd frontend
+          npm ci
+          npm audit
+
+  gitleaks:
+    name: Gitleaks (full history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  trivy-backend:
+    name: Trivy Image Scan (backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build ./backend -f ./backend/Dockerfile -t careercore-backend:scan
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: careercore-backend:scan
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+
+  trivy-frontend:
+    name: Trivy Image Scan (frontend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build frontend image
+        run: docker build ./frontend -f ./frontend/Dockerfile -t careercore-frontend:scan
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: careercore-frontend:scan
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH

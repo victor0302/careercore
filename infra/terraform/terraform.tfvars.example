@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and fill in real values.
+# Never commit terraform.tfvars — it is in .gitignore.
+
+region      = "us-east-1"
+app_name    = "careercore"
+environment = "development"
+db_password = "replace-with-a-strong-password"
