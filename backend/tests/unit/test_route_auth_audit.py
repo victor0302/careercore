@@ -9,7 +9,6 @@ and every other endpoint declares get_current_user.
 import ast
 from pathlib import Path
 
-
 _ENDPOINT_DIR = Path(__file__).resolve().parents[2] / "app" / "api" / "v1" / "endpoints"
 _PUBLIC_ENDPOINTS = {
     ("health.py", "health_check"),
@@ -69,6 +68,6 @@ def test_main_disables_docs_routes_in_production() -> None:
     main_path = Path(__file__).resolve().parents[2] / "app" / "main.py"
     source = main_path.read_text(encoding="utf-8")
 
-    assert 'docs_url = None if settings.is_production else "/docs"' in source
-    assert 'redoc_url = None if settings.is_production else "/redoc"' in source
-    assert 'openapi_url = None if settings.is_production else "/openapi.json"' in source
+    assert 'docs_url = None if app_settings.is_production else "/docs"' in source
+    assert 'redoc_url = None if app_settings.is_production else "/redoc"' in source
+    assert 'openapi_url = None if app_settings.is_production else "/openapi.json"' in source
