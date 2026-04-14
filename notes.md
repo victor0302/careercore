@@ -1571,3 +1571,78 @@ The public file contract is now intentionally smaller than the internal
 deliberately through the schema and decide whether it is safe to expose. Do not
 short-circuit that decision by returning ORM fields or raw dictionaries from
 the endpoint.
+
+### 12.17 Issue #22 — Job analysis and requirement-match migrations
+
+This ticket was deliberately narrow: make Alembic catch up to ORM models that
+already existed for `JobAnalysis`, `MatchedRequirement`, and
+`MissingRequirement`.
+
+What changed:
+- added migration `20260414_0004` after `20260413_0003`
+- created `job_analyses` with FKs to `job_descriptions` and `users`, both using
+  `ON DELETE CASCADE`
+- created `matched_requirements` and `missing_requirements` with FK →
+  `job_analyses.id ON DELETE CASCADE`
+- persisted `job_analyses.score_breakdown` as PostgreSQL `JSONB`
+- created the PostgreSQL enum `matchtype` and used it for
+  `matched_requirements.match_type`
+- added focused migration tests covering:
+  - revision/down_revision linkage
+  - expected tables and indexes
+  - JSONB type for `score_breakdown`
+  - DB-enforced enum wiring for `match_type`
+  - downgrade order and enum cleanup
+
+Why was this kept as a migration-only ticket instead of touching scoring code?
+
+Because the issue was about persistence parity, not scoring behavior.
+
+The ORM already defined the analysis models. The missing piece was that a fresh
+database still could not create the corresponding tables through Alembic. That
+is exactly the sort of schema drift that should be fixed in isolation. Pulling
+scoring logic or API behavior into the same diff would have made review worse
+and blurred whether the ticket was about data shape or business behavior.
+
+Why `JSONB` and a DB enum instead of simpler text columns?
+
+Because those are already the persisted contracts implied by the ORM and the
+accepted scoring design:
+- `score_breakdown` is structured nested data, not just a blob of display text
+- `match_type` is a constrained domain value, not free-form user content
+
+The migration’s job here was not to invent those decisions. It was to encode
+them at the database layer so the schema enforces what the models already say.
+
+Important tradeoff:
+
+The test for this ticket is intentionally a focused migration-structure test,
+not a full integration migration against a live PostgreSQL service. That means
+it gives strong coverage for revision wiring, JSONB usage, FK shape, enum
+creation/drop, and downgrade ordering, but it does not substitute for a full
+end-to-end migration run in CI or a fresh database environment.
+
+Real issues encountered during implementation and coordination:
+- The shared `/home/vic/careercore` worktree moved underneath the task while the
+  migration work was in progress. The branch unexpectedly flipped from the
+  issue branch back to `main`, and there was also an unrelated `DECISIONS.md`
+  modification present there.
+- Earlier in the session the same repository family had already been affected by
+  multiple active worktrees and other issue branches moving in parallel. That
+  made the shared worktree untrustworthy as a clean isolation boundary.
+- The fix was to replay the issue `#22` changes into a dedicated clean worktree
+  from `origin/main` and finish the implementation, verification, commit, and
+  PR steps there instead of trying to force the work through a drifting tree.
+
+That coordination problem matters for future contributors. When multiple agents
+or sessions are active, "current branch" in one shell is not a reliable source
+of truth for another shell. If the branch context changes under you, stop
+treating the current worktree as authoritative and move the ticket into a clean
+worktree or branch immediately.
+
+What future contributors should understand before changing it:
+
+If you change any of the analysis persistence models later, the migration chain
+must change in the same PR. Do not leave ORM-only schema changes sitting ahead
+of Alembic again. For this part of the system, "model exists" and "fresh
+database can create the table" must mean the same thing.
