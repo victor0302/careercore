@@ -259,6 +259,77 @@ select(Entity).where(Entity.id == entity_id, Entity.user_id == user_id)
 ```
 The post-hoc ownership check in the endpoint (`record.user_id != current_user.id`) was defense-in-depth masking a broken service contract and was removed after the fix.
 
+---
+
+## ADR-014 — One issue = one branch = one PR
+
+**Date:** 2026-04-13  
+**Status:** Accepted
+
+**Context:**  
+The project moved from scaffold state to active multi-ticket development with multiple classmates expected to contribute in parallel. Without a strict work boundary, unrelated changes can bleed into the same review.
+
+**Decision:**  
+Every implementation ticket follows this workflow:
+1. Confirm dependent PRs are merged  
+2. Update local `main` from GitHub  
+3. Assign the issue  
+4. Move the project item to `In Progress`  
+5. Create a dedicated issue branch from `main`  
+6. Implement only the ticket scope  
+7. Push the branch  
+8. Open a PR linked with `Closes #<issue>`  
+
+**Consequences:**  
+- Review diffs stay narrow and intelligible.  
+- Reverts are safer because each PR maps cleanly to one issue.  
+- If branch context becomes ambiguous, work must stop and be recovered onto a clean issue branch rather than continuing blindly.
+
+---
+
+## ADR-015 — Minimal GitHub Project metadata
+
+**Date:** 2026-04-13  
+**Status:** Accepted
+
+**Context:**  
+The team needed a shared planning surface, but overly complex project boards usually decay faster than the codebase itself.
+
+**Decision:**  
+Use one project board (`CareerCore Phase 1`) with:
+- built-in `Status` field (`Todo`, `In Progress`, `Done`)
+- one custom `Priority` field (`P1`, `P2`, `P3`)
+
+No additional workflow fields unless a real coordination problem appears that cannot be solved with issue text, assignees, and milestones.
+
+**Consequences:**  
+- Low clerical overhead, so the board is more likely to stay accurate.  
+- Enough signal to coordinate work without creating "process theater."  
+- Priority and status become the only board metadata developers are expected to keep current.
+
+---
+
+## ADR-016 — `notes.md` as local engineering handbook, not mandatory repo artifact
+
+**Date:** 2026-04-13  
+**Status:** Accepted
+
+**Context:**  
+`notes.md` became a high-value architectural and workflow reference, but it also grew into a personal/operator-facing handbook that may change more often than the shared codebase should.
+
+**Decision:**  
+Keep `notes.md` tracked in the repository history, but allow local-only evolution on a developer machine via:
+```bash
+git update-index --skip-worktree notes.md
+```
+
+This means the file remains available to new sessions and future contributors, but local edits do not automatically appear in normal branch diffs.
+
+**Consequences:**  
+- The repo retains a durable baseline architectural handbook.  
+- Developers can extend their local notes without accidentally polluting feature PRs.  
+- If a note becomes important enough for the team, `--no-skip-worktree` must be used before committing it intentionally.
+
 **Consequences:**  
 Ownership is enforced at the service boundary, not the endpoint boundary. Endpoints that trust the service contract are correct by construction. Any new `get_for_user` implementation that omits the `user_id` filter will be caught in ownership unit tests.
 
