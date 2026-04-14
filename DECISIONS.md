@@ -596,3 +596,23 @@ The ORM already defined `JobAnalysis`, `MatchedRequirement`, and `MissingRequire
 - Model names can be pinned per deployment environment via environment variables without touching application code.  
 - `MockAIProvider` satisfies the full contract and keeps all unit tests network-free; `_ZERO_USAGE` makes mock overhead negligible.  
 - The Protocol's tuple signatures are now the authoritative source for what every AI call must produce — change them only when `AICostService` or a new billing concern requires it.
+
+---
+
+## ADR-026 — Alembic revision order must match real schema dependencies
+
+**Date:** 2026-04-14 (backfill for PR #68, issue #21)  
+**Status:** Accepted
+
+**Context:**  
+The repository already contained migration `20260414_0004_create_job_analysis_tables`, but that revision depended on `job_descriptions` existing even though no earlier migration created `job_descriptions` or `job_requirements`. On a fresh database, that revision chain was invalid: later tables referenced objects that had never been created.
+
+**Decision:**  
+- `job_descriptions` and `job_requirements` are created in a dedicated prerequisite revision (`20260414_0003a`) before any job-analysis tables.  
+- `job_requirements.category` is enforced with a PostgreSQL enum (`jobrequirementcategory`) at the database layer, not as an application-only convention.  
+- Later migrations that depend on those tables must point their `down_revision` to the prerequisite job-schema revision, not skip over it.
+
+**Consequences:**  
+- A fresh Alembic upgrade path now creates the job schema in dependency order instead of relying on out-of-band table creation.  
+- Database integrity rules for job requirements live in the migration layer as well as the ORM layer; invalid category values are rejected before application code sees them.  
+- When a migration is added out of order, the fix is to repair the revision chain explicitly rather than silently assuming existing databases already contain the missing tables.

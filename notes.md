@@ -1812,7 +1812,109 @@ must change in the same PR. Do not leave ORM-only schema changes sitting ahead
 of Alembic again. For this part of the system, "model exists" and "fresh
 database can create the table" must mean the same thing.
 
-### 12.19 Issue #9 — Implement POST /auth/logout
+### 12.19 Issue #21 — Job description and requirement migrations
+
+This ticket filled a real gap in the database history for the job-analysis
+slice. The ORM already had `JobDescription`, and a later migration already
+created `job_analyses`, but the schema was missing the prerequisite migration
+that actually creates `job_descriptions` and the child `job_requirements`
+table.
+
+What changed:
+- added `JobRequirement` as a real ORM model with:
+  - `job_id`
+  - `requirement_text`
+  - enum-backed `category`
+  - `is_required`
+- added the `JobDescription.requirements` relationship so the model layer
+  matches the database shape
+- created Alembic revision `20260414_0003a` to create:
+  - `job_descriptions`
+  - `job_requirements`
+  - the PostgreSQL enum type `jobrequirementcategory`
+- updated the existing `20260414_0004_create_job_analysis_tables` revision so
+  its `down_revision` points to the new prerequisite migration instead of
+  incorrectly pointing at `20260413_0003`
+- added migration-focused unit tests for both the new revision and the updated
+  job-analysis revision chain
+
+Why implement it this way?
+
+Because this was not just "write the missing migration file." The repository
+already had a later migration that assumed the earlier job schema existed. If
+we had only added a new migration without repairing the revision chain, fresh
+database setup would still have been wrong in a subtle way: Alembic would apply
+`0004` without a valid guarantee that its foreign-key targets had been created
+by prior revisions.
+
+The right fix was to make the dependency explicit:
+- create the missing prerequisite revision
+- move the later job-analysis revision so it depends on that revision
+
+That preserves the meaning of the migration history for fresh clones, which is
+the actual acceptance criterion that matters.
+
+Why add a real `JobRequirement` model in the same ticket?
+
+Because the issue is about model and migration alignment, not migration text in
+isolation. The database table should not exist without a matching ORM type that
+describes the same enum and foreign-key contract. If we had created only the
+Alembic file, the repo would have had a database object the model layer could
+not represent cleanly.
+
+Important tradeoff:
+
+The requirement category is enforced with a PostgreSQL enum at the database
+layer. That is the correct choice for a small, closed category set because it
+prevents drift between application code and stored values. The tradeoff is that
+adding or renaming a category later is now a schema migration, not a pure
+Python refactor. That is acceptable here because requirement categories are a
+core part of the scoring and analysis contract.
+
+Real issues encountered during implementation:
+
+The shared `/home/vic/careercore` worktree was not safe to use for this issue.
+When the required workflow step `git checkout main && git pull origin main` was
+attempted there, the pull failed because unrelated local changes already
+existed:
+- modified `DECISIONS.md`
+- untracked migration/test files for other work
+
+That matters because trying to "clean it up quickly" in the shared worktree
+would have risked overwriting another agent's state. The implementation was
+therefore moved into a dedicated clean worktree at
+`/tmp/careercore-issue21` based on `origin/main`. That is exactly the kind of
+concurrent-agent interference ADR-023 is meant to prevent.
+
+Verification issues also mattered here:
+
+1. `pytest` was not installed in the base shell, so a plain `pytest ...` run
+   failed immediately.
+2. The normal `uv run pytest` path then failed for an unrelated packaging
+   reason: `backend/pyproject.toml` still references
+   `setuptools.backends.legacy:build`, which is not importable in the isolated
+   build environment.
+3. The final verification path used `uv run --no-project ... --noconftest`
+   with just the dependencies needed to load the migration modules and run the
+   migration-shape tests.
+
+That last point is important for future contributors: the migration tests added
+here are valid, but the repository's default Python packaging/test bootstrap
+still has unrelated defects. Do not treat those bootstrap problems as evidence
+that the migration work itself is wrong.
+
+What future contributors should understand before changing it:
+
+If you add any new job-analysis table that depends on `job_descriptions` or
+`job_requirements`, check the revision chain first. A migration history that
+only works on databases with pre-existing state is broken, even if it appears
+to work locally.
+
+Also, if multiple agents are active, do not start this kind of migration work
+in the shared repo path. Fresh-schema issues are exactly the kind of work where
+branch confusion and mixed local state create misleading results.
+
+### 12.20 Issue #9 — Implement POST /auth/logout
 
 This ticket completed the session lifecycle. Issue #8 gave the system the
 ability to validate and rotate refresh tokens. Issue #9 gave users a way to
@@ -1879,7 +1981,7 @@ invalidation, document the change in a new ADR and update the test that
 verifies all tokens are marked used. If you add access token invalidation,
 that requires a Phase 2 Redis denylist and a new ADR for the tradeoff.
 
-### 12.20 Issue #3 — Complete AnthropicProvider implementation and exception mapping
+### 12.21 Issue #3 — Complete AnthropicProvider implementation and exception mapping
 
 This ticket wired up the real Anthropic SDK provider and established the
 token-accounting contract that every future AI call will satisfy.
