@@ -65,6 +65,34 @@ async def test_get_file_url_returns_404_for_missing_file_id(monkeypatch) -> None
     assert exc_info.value.detail == "File not found."
 
 
+async def test_get_file_url_returns_404_for_cross_user_access(monkeypatch) -> None:
+    owner_id = uuid.uuid4()
+    file_id = uuid.uuid4()
+
+    class FakeFileService:
+        def __init__(self, db: object) -> None:
+            self.db = db
+
+        async def get_download_url_for_user(
+            self, user_id: uuid.UUID, requested_file_id: uuid.UUID
+        ) -> str | None:
+            assert user_id == owner_id
+            assert requested_file_id == file_id
+            return None
+
+    monkeypatch.setattr(files_endpoint, "FileService", FakeFileService)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await files_endpoint.get_file_url(
+            file_id=file_id,
+            current_user=SimpleNamespace(id=owner_id),
+            db=object(),
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "File not found."
+
+
 async def test_upload_file_maps_unsupported_type_to_415(monkeypatch) -> None:
     class FakeFileService:
         def __init__(self, db: object) -> None:

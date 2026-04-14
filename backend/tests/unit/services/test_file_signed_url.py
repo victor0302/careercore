@@ -15,7 +15,7 @@ def _make_service() -> FileService:
     return service
 
 
-async def test_get_download_url_for_user_returns_none_for_missing_or_non_owned_file() -> None:
+async def test_get_download_url_for_user_returns_none_for_missing_file() -> None:
     service = _make_service()
 
     async def fake_get_for_user(user_id: uuid.UUID, file_id: uuid.UUID) -> None:
@@ -27,6 +27,26 @@ async def test_get_download_url_for_user_returns_none_for_missing_or_non_owned_f
     )
 
     result = await service.get_download_url_for_user(uuid.uuid4(), uuid.uuid4())
+
+    assert result is None
+
+
+async def test_get_download_url_for_user_returns_none_for_non_owned_file() -> None:
+    service = _make_service()
+    requester_id = uuid.uuid4()
+    file_id = uuid.uuid4()
+
+    async def fake_get_for_user(user_id: uuid.UUID, requested_file_id: uuid.UUID) -> None:
+        assert user_id == requester_id
+        assert requested_file_id == file_id
+        return None
+
+    service.get_for_user = fake_get_for_user  # type: ignore[method-assign]
+    service.get_presigned_url = lambda storage_key, expires_in=None: pytest.fail(  # type: ignore[method-assign]
+        "presigned URL should not be generated for a file owned by another user"
+    )
+
+    result = await service.get_download_url_for_user(requester_id, file_id)
 
     assert result is None
 
