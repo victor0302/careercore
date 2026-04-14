@@ -1571,3 +1571,168 @@ The public file contract is now intentionally smaller than the internal
 deliberately through the schema and decide whether it is safe to expose. Do not
 short-circuit that decision by returning ORM fields or raw dictionaries from
 the endpoint.
+
+### 12.17 Issue #2 — Harden MockAIProvider and shared test fixtures (PR #63)
+
+This ticket resolved three concrete problems that had been blocking reliable
+local test execution since the scaffold was created, and documented them with
+runtime contract tests so the bootstrap problems cannot silently regress.
+
+#### What changed
+
+| File | Change |
+|------|--------|
+| `backend/tests/conftest.py` | Move `os.environ.setdefault` calls before all app imports |
+| `backend/app/db/session.py` | Skip `pool_size`/`max_overflow` for SQLite URLs |
+| `backend/tests/unit/ai/test_provider_contract.py` | 8 new async runtime contract tests |
+| `backend/tests/unit/ai/__init__.py` | Add missing package marker |
+
+#### Why the conftest import order mattered
+
+`app/db/session.py` calls `get_settings()` at module level. `Settings` is a
+Pydantic `BaseSettings` model with required fields (`DATABASE_URL`,
+`JWT_SECRET_KEY`, etc.). If any of those fields is missing from the environment
+when the module is first imported, Pydantic raises `ValidationError` before the
+test file even loads.
+
+The original `conftest.py` set environment variables using `os.environ.setdefault`
+**after** the app imports:
+
+```python
+from app.db.session import get_db      # ← triggers get_settings() → ValidationError
+...
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")  # ← too late
+```
+
+The fix moves all `setdefault` calls to the top of the file before any app
+module is imported. The `# noqa: E402` comments acknowledge the intentional
+module-level import-after-code pattern required by this constraint.
+
+This is a real bootstrap coupling. `session.py` reads settings eagerly so it
+can build the SQLAlchemy engine object at module load time. That is a defensible
+choice for production (one eager engine per process), but it means the test
+environment must set up the env before the engine ever instantiates.
+
+#### Why the session.py pool-arg fix was also needed
+
+Even after the env vars are set correctly, SQLAlchemy raises a `TypeError` when
+you pass `pool_size` and `max_overflow` to a SQLite engine:
+
+```
+TypeError: Invalid argument(s) 'pool_size','max_overflow' sent to create_engine(),
+using configuration SQLiteDialect_aiosqlite/StaticPool/Engine.
+```
+
+SQLite uses a `StaticPool` (one connection object, reused) because it is a
+file-local or in-memory database. The pool-sizing options are meaningful only
+for connection-pool-capable backends like PostgreSQL. The fix detects `sqlite`
+in the URL and skips those kwargs:
+
+```python
+_is_sqlite = settings.DATABASE_URL.startswith("sqlite")
+_engine_kwargs = {"echo": ..., "pool_pre_ping": not _is_sqlite}
+if not _is_sqlite:
+    _engine_kwargs["pool_size"] = 10
+    _engine_kwargs["max_overflow"] = 20
+```
+
+This directly enables the test strategy in ADR-014: unit tests run against
+SQLite in-memory with no services. Previously, even a correctly ordered
+`conftest.py` would have failed here.
+
+#### Why runtime contract tests matter
+
+The existing `test_provider_contract.py` only checked that `MockAIProvider`
+was accepted by `isinstance(obj, AIProvider)` and that the Protocol's method
+signatures had correct type annotations. It never actually **called** any
+method. That meant the following class would have passed the test even though
+it is broken:
+
+```python
+class MockAIProvider:
+    async def parse_job_description(self, raw_text: str) -> ParsedJD:
+        return None  # wrong — would fail at runtime, not test time
+```
+
+The 8 new runtime tests call every method with realistic inputs and assert
+that the return type is the declared Pydantic model. One dedicated test also
+patches `socket.socket.connect` to raise, proving that no network I/O occurs
+during a mock call. These tests close the gap between "the protocol shape
+is correct" and "the mock actually satisfies the contract at runtime."
+
+#### Real issues encountered during implementation
+
+**Branch thrashing with concurrent agents and multiple worktrees**
+
+This was the most disruptive problem of the session and worth documenting in
+detail so future agents avoid it.
+
+The repository uses `git worktree` to isolate concurrent agent branches. At
+the start of this session, `/home/vic/careercore` was already checked out to
+`issue-3-anthropic-provider` by another agent. When this agent ran:
+
+```bash
+git checkout main && git pull origin main
+git checkout -b issue-2-harden-mockai
+```
+
+...it switched the shared main worktree from `issue-3` to `main` to the new
+`issue-2` branch — disrupting the other agent's working state.
+
+The subsequent sequence of `git stash`, `git checkout`, and `git stash pop`
+operations moved changes across branches multiple times, mixing issue-9
+(logout) files into the issue-2 stash, and causing the main worktree to end
+up on `issue-12-profile-migrations` and then `issue-3-anthropic-provider`
+at various points. Every `git status` showed a different branch than expected.
+
+The root cause is simple: `git checkout` in the shared worktree changes HEAD
+for everyone using that worktree path. There is no isolation.
+
+The correct approach — only discovered after several recovery attempts — was
+to create a dedicated worktree for issue-2:
+
+```bash
+git worktree add /home/vic/careercore-issue-2 issue-2-harden-mockai
+```
+
+All subsequent work happened in `/home/vic/careercore-issue-2`, which is
+completely isolated from the main worktree and from all other issue worktrees.
+This is now the documented convention (see ADR-023).
+
+**pytest not installed in the `.venv`**
+
+The `.venv` at `backend/.venv` had the application dependencies installed but
+not the dev/test dependencies (`pytest`, `pytest-asyncio`, `aiosqlite`, etc.).
+These were installed with:
+
+```bash
+uv pip install --python .venv/bin/python pytest pytest-asyncio pytest-cov httpx aiosqlite
+```
+
+Other application-level deps needed at test collection time (`pydantic[email]`,
+`boto3`, `botocore`) were installed the same way. Future agents should use
+`uv pip install -e ".[dev]"` from the backend directory to get all dev deps.
+
+**uv build failure with setuptools.backends**
+
+Running `uv run pytest` failed because the `pyproject.toml` build-system uses
+`setuptools.backends.legacy:build` which is not available without an explicit
+`setuptools.backends` install. The workaround was to use the pre-existing
+`.venv` directly and install deps into it explicitly. The root packaging issue
+was not fixed in this ticket (it is unrelated to issue #2 scope).
+
+#### What future contributors should understand
+
+1. **Always create a dedicated worktree** for issue work when other agents may
+   be active. `git worktree list` shows all active worktrees. Never use
+   `git checkout` in the shared main worktree while someone else is working
+   there.
+
+2. **The SQLite unit test bootstrap is now stable** for pure-Python business
+   logic. Tests involving `JSONB`/`ARRAY` columns still require the PostgreSQL
+   integration suite per ADR-014.
+
+3. **The mock provider is the complete test implementation.** Every
+   `MockAIProvider` method now has a runtime test asserting the correct return
+   type. If you add a new protocol method, add the mock implementation and a
+   corresponding runtime test in the same PR.
