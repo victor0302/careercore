@@ -2090,3 +2090,119 @@ than reusing the constant.
 The model routing (haiku vs. sonnet) is documented in ADR-007 and ADR-025. If
 you add a new provider method, choose the tier based on expected output
 complexity: structured extraction → haiku, open-ended generation → sonnet.
+
+### 12.22 Issue #35 — Finalize AICallLog migration and enum/index coverage
+
+This was a pure migration ticket. The `AICallLog` ORM model already existed;
+the task was to write the missing Alembic migration that creates the matching
+database table, and to make sure the migration encodes the same constraints and
+design choices that the ORM model expresses.
+
+What changed:
+- added `backend/alembic/versions/20260414_0005_create_ai_call_logs_table.py`
+  which creates `ai_call_logs` with all columns, the `aicalltype` PostgreSQL
+  enum, the composite index, and no FK on `user_id`
+- `revision = "20260414_0005"`, `down_revision = "20260414_0004"` — the
+  migration slots cleanly after the job analysis tables
+- added `backend/tests/unit/test_ai_call_log_migration.py` with 6 unit tests
+  that verify the migration structure without needing a live database
+
+**Why does this migration exist at all — isn't the ORM enough?**
+
+This is one of the first things that trips up new Django and FastAPI developers.
+The ORM class tells SQLAlchemy what the table *should* look like. But the
+actual database does not change until something runs against it. In development
+you might call `Base.metadata.create_all()` and it works. In production that
+is dangerous — it runs the full table creation every deploy, it does not track
+what has already been applied, and it cannot reverse a change if something goes
+wrong.
+
+Alembic is the version-control system for your database schema. Each migration
+file is a numbered, ordered step. You can run `alembic upgrade head` on a fresh
+database and get the full schema. You can run `alembic downgrade -1` and undo
+the last step. You can look at the migration history and know exactly what
+changed and when. Without migrations, your schema exists only in memory and
+your deployment story is "hope `create_all()` does the right thing."
+
+**Why no FK on user_id?**
+
+When you define a foreign key like `ForeignKeyConstraint(["user_id"],
+["users.id"], ondelete="CASCADE")`, you are telling the database: "if the
+referenced user row is deleted, delete these rows too." That is usually correct
+for owned data — deleting a user should delete their job descriptions, their
+analyses, their files. It is incorrect for financial records.
+
+If a user deletes their account and the AI call logs cascade-delete, the billing
+department has no record of charges already incurred. A refund request cannot
+be verified. A fraud investigation cannot be completed. Cost attribution for
+a billing period is now wrong.
+
+The rule of thumb: data that belongs to a user (profile, jobs, analyses) → FK
+with CASCADE. Data that records a fact about what a user did (audit logs, cost
+logs) → no FK. The fact outlives the account.
+
+**Why Numeric(10, 6) instead of Float?**
+
+`Float` is a binary floating-point type (IEEE 754). It cannot represent `0.1`
+exactly in binary. If you store 1000 rows each costing `$0.000004` and sum
+them, you will not get exactly `$0.004` — you will get something like
+`$0.003999999...`. This is fine for sensor readings. It is not fine for an
+invoice.
+
+`Numeric(10, 6)` is an exact decimal type. It stores the number as its actual
+decimal digits. `10` is the total number of significant digits; `6` is how many
+come after the decimal point. So the maximum value is `9999.999999` and the
+minimum non-zero value is `0.000001` (one micro-dollar). Adding a thousand rows
+of `0.000004` gives exactly `0.004000`.
+
+The practical impact: the per-call cost for Claude Haiku is about `$0.000025`.
+Stored as a float, hundreds of summed calls will produce numbers like
+`0.02499999...` instead of `0.025`. Multiply that across thousands of users
+and your revenue report is quietly wrong. Use Numeric for money. Always.
+
+**Why (user_id, created_at) and not (created_at, user_id) for the index?**
+
+A composite index is read left to right. The database uses the leftmost column
+first. The budget check query pattern is:
+
+```sql
+SELECT SUM(total_tokens) FROM ai_call_logs
+WHERE user_id = $1 AND created_at >= $2
+```
+
+With `(user_id, created_at)`, the database finds all rows for that user in the
+index, then filters to today's entries — one index scan per user. With
+`(created_at, user_id)`, the database would have to scan all rows since
+midnight and then filter by user — much more expensive once the table grows.
+Index column order should match the selectivity and query pattern: the most
+selective filter first, then the range column.
+
+**Why unit-test the migration structure instead of running it?**
+
+Running a migration requires a live database. The unit tests in this project
+follow a split: pure-logic tests use SQLite or mock objects offline; database
+integration tests run against PostgreSQL in CI. Migration content is pure
+structure — it is a description of what SQL to run, not the running of it. You
+can verify that description without executing it.
+
+The test pattern (load the migration module with `importlib`, inject a
+`_FakeOp` that records calls, assert on what was recorded) is the same pattern
+used in `test_job_analysis_migrations.py`. If you add a new migration, follow
+the same pattern: verify revision IDs, verify column types, verify indexes,
+verify downgrade order.
+
+Real issues encountered during implementation and testing:
+
+The main challenge was concurrent branch-switching by other agents sharing the
+working directory. The implementation and commit were done in a single Bash
+call to close the race window, and branch identity was verified at the start of
+that call. All 6 unit tests passed in 0.08 seconds on the first run.
+
+What future contributors should understand before changing it:
+
+The `aicalltype` enum at the Python level and at the Postgres level must stay
+in sync. If you add a new `AICallType` value to the ORM model, you need a new
+migration that calls `op.execute("ALTER TYPE aicalltype ADD VALUE '...'")`  —
+you cannot just update the existing migration, because the previous migration
+has already been applied to every existing database. The migration chain is
+immutable history, not editable source.
