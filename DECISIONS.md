@@ -393,3 +393,33 @@ Whitespace-only string fields do not count as present. No AI call is involved.
 - The stored value can be returned directly to clients without recomputing the formula in frontend code.  
 - Any future Phase 2 profile section must explicitly decide whether it changes the completeness formula; adding a new table alone does not affect the score.  
 - Endpoints mutating profile sub-entities now own the responsibility to trigger a completeness recalculation before the request transaction commits.
+---
+
+## ADR-019 — Route protection is default-deny; public exceptions are explicit
+
+**Date:** 2026-04-13 (issue #10)  
+**Status:** Accepted
+
+**Context:**  
+The API already used `get_current_user` on most non-public endpoints, but the rule was implicit and the behavior for missing access tokens depended on FastAPI's default `HTTPBearer`, which returned `403` for absent credentials. The application also exposed `/docs`, `/redoc`, and `/openapi.json` in all environments.
+
+**Decision:**  
+- Every non-public API endpoint must declare `get_current_user` explicitly as a FastAPI dependency.  
+- Missing, invalid, and expired Bearer access tokens all return `401 Unauthorized` with `WWW-Authenticate: Bearer`.  
+- The route-protection audit is enforced with tests over the endpoint source tree, so the public exception set stays reviewable even while the shared app bootstrap remains noisy in local tests.  
+- The public API exceptions are:
+  - `GET /health`
+  - `POST /api/v1/auth/register`
+  - `POST /api/v1/auth/login`
+  - `POST /api/v1/auth/refresh`
+- Documentation routes are public only in development:
+  - `GET /docs`
+  - `GET /redoc`
+  - `GET /openapi.json`
+  In production, those routes are disabled.
+
+**Consequences:**  
+- Route protection can be audited mechanically: anything not in the public exception set must depend on `get_current_user`.  
+- Clients get the correct auth semantics for missing and expired access tokens; `403` is reserved for authorization failures after authentication.  
+- The auth boundary stays testable even when full app-import integration tests are temporarily constrained by import-time settings and database bootstrap coupling.  
+- Production deployments no longer expose the interactive API docs or OpenAPI schema unless that policy is changed deliberately.

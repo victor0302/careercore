@@ -1423,3 +1423,76 @@ What future contributors should understand before changing it:
 you add a new profile section, change the weights, or move recalculation out of
 mutation paths, you are changing user-visible behavior and should update both
 the ADR and the tests in the same PR.
+### 12.15 Issue #10 — Enforce auth on non-public routes and document public exceptions
+
+This issue was partly an implementation fix and partly a boundary audit.
+
+The route tree was already close to correct. Most non-public endpoints already
+declared `get_current_user`, so the main risk was not a missing dependency on
+one obvious route. The real risk was relying on implicit behavior and on
+FastAPI defaults that did not match the contract we wanted to preserve.
+
+What changed:
+- `get_current_user` now uses `HTTPBearer(auto_error=False)` and converts the
+  missing-credentials path into the same `401 Unauthorized` response used for
+  invalid and expired access tokens
+- `create_app()` now exposes `/docs`, `/redoc`, and `/openapi.json` only when
+  `APP_ENV` is not production
+- added auth-audit tests covering:
+  - missing-token `401` behavior on protected routes
+  - expired-token `401` behavior
+  - the route-tree rule, enforced by source inspection, that every non-public
+    endpoint declares `get_current_user`
+  - the development-vs-production docs route policy
+- documented the explicit public exception set in `README.md`
+
+Why change `HTTPBearer` instead of accepting FastAPI's default `403`?
+
+Because `403` is the wrong semantic response for "no credentials" or "expired
+credentials."
+
+The correct contract here is:
+- no token → `401`
+- malformed or expired token → `401`
+- authenticated user lacks permission → `403`
+
+That distinction matters for clients, for security review, and for keeping the
+code aligned with RFC 6750. If the app returns `403` before authentication has
+even succeeded, the boundary becomes harder to reason about.
+
+Why disable docs and OpenAPI in production?
+
+Because they are a public exception, not part of the authenticated product
+surface.
+
+The issue did not require hiding `/health`; that endpoint remains public by
+design for deployment probes. But interactive docs and schema discovery are a
+different category. They are useful in local development and review
+environments, but they should not stay exposed in production by accident just
+because FastAPI makes it easy.
+
+Important tradeoff:
+
+This issue uses an explicit exception list rather than trying to infer "public"
+routes from tags or naming conventions. That is intentionally rigid. Security
+boundaries should be obvious in code review. If a future contributor wants to
+make a route public, that should be a deliberate product decision with matching
+docs and tests, not an incidental refactor.
+
+Real issues encountered during implementation and testing:
+- The shared local backend environment in this workspace is still unstable for
+  normal test execution. Import-time settings and database engine construction
+  continue to make the lightweight local test path fragile.
+- Because of that, the most reliable guardrail for the route audit was a static
+  test over the endpoint source tree rather than a fully booted app import.
+- That is acceptable here because the rule being enforced is structural: which
+  endpoints declare `get_current_user`, which routes are explicitly allowed to
+  remain public, and whether docs exposure is tied to environment as intended.
+
+What future contributors should understand before changing it:
+
+The default rule is now "protected unless explicitly listed as public." If you
+add a new route and it does not belong in the small public exception set, wire
+`get_current_user` into the endpoint immediately and extend the tests in the
+same PR. If you think a new route should be public, treat that as a security
+policy change, not a convenience tweak.
