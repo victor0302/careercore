@@ -1423,7 +1423,6 @@ What future contributors should understand before changing it:
 you add a new profile section, change the weights, or move recalculation out of
 mutation paths, you are changing user-visible behavior and should update both
 the ADR and the tests in the same PR.
-
 ### 12.15 Issue #10 — Enforce auth on non-public routes and document public exceptions
 
 This issue was partly an implementation fix and partly a boundary audit.

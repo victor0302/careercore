@@ -393,7 +393,6 @@ Whitespace-only string fields do not count as present. No AI call is involved.
 - The stored value can be returned directly to clients without recomputing the formula in frontend code.  
 - Any future Phase 2 profile section must explicitly decide whether it changes the completeness formula; adding a new table alone does not affect the score.  
 - Endpoints mutating profile sub-entities now own the responsibility to trigger a completeness recalculation before the request transaction commits.
-
 ---
 
 ## ADR-019 — Route protection is default-deny; public exceptions are explicit
