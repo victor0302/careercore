@@ -53,3 +53,43 @@ What to remember next time:
   immediately
 - keep migration tickets small; do not "bundle in" model behavior changes just
   because the same tables are involved
+
+### Issue #21 — Job description and requirement migrations
+
+What was done:
+- read `DECISIONS.md`
+- checked the issue with `gh issue view 21`
+- created and used a clean issue worktree to add:
+  - `JobRequirement`
+  - migration `20260414_0003a_create_job_description_and_requirement_tables.py`
+  - migration-shape tests for the new revision and the updated `0004` revision
+- updated `20260414_0004_create_job_analysis_tables.py` so its dependency chain
+  points at the new prerequisite migration
+
+What mattered:
+- this ticket was about restoring a correct fresh-database migration path, not
+  about parse flow or scoring behavior
+- `job_requirements.category` had to be DB-enforced through the
+  `jobrequirementcategory` enum
+- the revision chain itself was part of the bug; adding a migration file alone
+  was not enough
+
+Operational problems encountered:
+- the shared `/home/vic/careercore` worktree could not safely run the standard
+  `main` sync step because unrelated modified and untracked files were already
+  present
+- concurrent branch activity from other agents made the shared tree unreliable
+  as an isolation boundary
+- the solution was to continue in `/tmp/careercore-issue21` instead of forcing
+  the issue through the drifting shared worktree
+- the normal `uv run pytest` path hit an unrelated packaging problem in
+  `backend/pyproject.toml` (`setuptools.backends.legacy:build`)
+
+What to remember next time:
+- if a migration issue depends on "fresh clone" behavior, do the work in a
+  clean worktree first
+- if later migrations already reference missing tables, repair the Alembic
+  dependency chain explicitly
+- when the standard test bootstrap fails before your new code loads, isolate
+  the module-level migration tests rather than broadening the ticket to fix
+  unrelated packaging work
