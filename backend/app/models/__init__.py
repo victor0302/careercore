@@ -5,6 +5,7 @@ from app.models.audit_log import AuditLog
 from app.models.certification import Certification
 from app.models.job_analysis import JobAnalysis, MatchedRequirement, MatchType, MissingRequirement
 from app.models.job_description import JobDescription
+from app.models.job_requirement import JobRequirement, JobRequirementCategory
 from app.models.profile import Profile
 from app.models.project import Project
 from app.models.refresh_token import RefreshToken
@@ -26,6 +27,8 @@ __all__ = [
     "UploadedFile",
     "FileStatus",
     "JobDescription",
+    "JobRequirement",
+    "JobRequirementCategory",
     "JobAnalysis",
     "MatchedRequirement",
     "MissingRequirement",

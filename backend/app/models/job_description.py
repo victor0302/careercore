@@ -32,6 +32,9 @@ class JobDescription(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     analyses: Mapped[list["JobAnalysis"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "JobAnalysis", back_populates="job", cascade="all, delete-orphan"
     )
+    requirements: Mapped[list["JobRequirement"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
+        "JobRequirement", back_populates="job", cascade="all, delete-orphan"
+    )
     resumes: Mapped[list["Resume"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "Resume", back_populates="job"
     )
@@ -42,4 +45,5 @@ class JobDescription(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 from app.models.user import User  # noqa: E402, F401
 from app.models.job_analysis import JobAnalysis  # noqa: E402, F401
+from app.models.job_requirement import JobRequirement  # noqa: E402, F401
 from app.models.resume import Resume  # noqa: E402, F401

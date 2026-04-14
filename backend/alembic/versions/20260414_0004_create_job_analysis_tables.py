@@ -1,7 +1,7 @@
 """create job analysis and requirement match tables
 
 Revision ID: 20260414_0004
-Revises: 20260413_0003
+Revises: 20260414_0003a
 Create Date: 2026-04-14 09:30:00.000000
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "20260414_0004"
-down_revision: str | None = "20260413_0003"
+down_revision: str | None = "20260414_0003a"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
