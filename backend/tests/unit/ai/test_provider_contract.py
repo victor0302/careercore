@@ -30,7 +30,7 @@ from app.ai.schemas import (
 )
 
 
-# ── Static protocol shape tests ───────────────────────────────────────────────
+# -- Static protocol shape tests ----------------------------------------------
 
 
 def test_ai_provider_protocol_method_signatures() -> None:
@@ -68,7 +68,7 @@ def test_current_providers_match_protocol_shape() -> None:
     assert isinstance(OllamaProvider(), AIProvider)
 
 
-# ── Runtime return-type tests for MockAIProvider ──────────────────────────────
+# -- Runtime return-type tests for MockAIProvider -----------------------------
 # These tests call every method and assert that the returned object is an
 # instance of the correct Pydantic model, which proves the mock satisfies the
 # full protocol contract without any network I/O.
@@ -86,6 +86,8 @@ async def test_mock_parse_job_description_returns_parsed_jd(
     assert len(result.requirements) > 0
     for req in result.requirements:
         assert isinstance(req, JobRequirementItem)
+    assert isinstance(usage, TokenUsage)
+    assert usage.model == "mock"
 
 
 @pytest.mark.asyncio
@@ -102,14 +104,14 @@ async def test_mock_generate_bullets_returns_typed_list(
             is_required=True,
         ),
     )
-    result, usage = await mock_ai_provider.generate_bullets([ctx], max_bullets=3)
-    assert isinstance(result, list)
-    assert isinstance(usage, TokenUsage)
-    assert len(result) == 1  # one context -> one bullet
-    bullet = result[0]
+    bullets, usage = await mock_ai_provider.generate_bullets([ctx], max_bullets=3)
+    assert isinstance(bullets, list)
+    assert len(bullets) == 1  # one context -> one bullet
+    bullet = bullets[0]
     assert isinstance(bullet, GeneratedBullet)
     assert 0.0 <= bullet.confidence <= 1.0
     assert bullet.evidence_entity_type == "work_experience"
+    assert isinstance(usage, TokenUsage)
 
 
 @pytest.mark.asyncio
@@ -129,8 +131,8 @@ async def test_mock_generate_bullets_respects_max_bullets(
         )
         for i in range(10)
     ]
-    result, _usage = await mock_ai_provider.generate_bullets(contexts, max_bullets=4)
-    assert len(result) <= 4
+    bullets, _usage = await mock_ai_provider.generate_bullets(contexts, max_bullets=4)
+    assert len(bullets) <= 4
 
 
 @pytest.mark.asyncio
@@ -151,6 +153,7 @@ async def test_mock_explain_score_returns_score_explanation(
     assert isinstance(result.strengths, list)
     assert isinstance(result.gaps, list)
     assert result.recommendation
+    assert isinstance(usage, TokenUsage)
 
 
 @pytest.mark.asyncio
@@ -166,6 +169,7 @@ async def test_mock_answer_followup_returns_follow_up_answer(
     assert isinstance(usage, TokenUsage)
     assert question.question in result.answer
     assert isinstance(result.sources, list)
+    assert isinstance(usage, TokenUsage)
 
 
 @pytest.mark.asyncio
@@ -185,6 +189,7 @@ async def test_mock_generate_recommendations_returns_summary(
     assert isinstance(usage, TokenUsage)
     assert len(result.recommendations) == len(missing)
     assert len(result.priority_order) == len(missing)
+    assert isinstance(usage, TokenUsage)
 
 
 @pytest.mark.asyncio
@@ -198,12 +203,13 @@ async def test_mock_generate_learning_plan_returns_markdown_string(
         missing_requirements=missing,
         user_summary="Developer with Python background.",
     )
-    recommendations, _usage = await mock_ai_provider.generate_recommendations(context)
+    recommendations, _ = await mock_ai_provider.generate_recommendations(context)
     result, usage = await mock_ai_provider.generate_learning_plan(recommendations, timeline_weeks=8)
     assert isinstance(result, str)
     assert isinstance(usage, TokenUsage)
     assert "8 weeks" in result
     assert "Docker" in result
+    assert isinstance(usage, TokenUsage)
 
 
 @pytest.mark.asyncio

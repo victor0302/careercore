@@ -471,3 +471,148 @@ Issue #8 established DB-backed refresh token rotation and noted that "logout can
 - If a more granular "logout this device only" flow is needed later, the endpoint can be extended to accept a specific token identifier — the `used_at` model already supports it.  
 - The access token itself is not invalidated (it is short-lived and stateless). An attacker who holds a valid access token retains access until it expires (≤15 min). This is the accepted Phase 1 tradeoff; a Redis-backed access token denylist is a Phase 2 concern.  
 - `POST /auth/logout` is the only `POST /auth/*` endpoint that requires authentication — it must stay out of the public exception list in the route protection audit.
+
+---
+
+## ADR-022 — Test bootstrap: env vars before app imports in conftest.py
+
+**Date:** 2026-04-14 (PR #63, issue #2)  
+**Status:** Accepted
+
+**Context:**  
+`app/db/session.py` creates a SQLAlchemy engine at module load time by calling
+`get_settings()` immediately. `Settings` validates all required environment
+variables on construction. The original `tests/conftest.py` set environment
+variables using `os.environ.setdefault` **after** the app module imports, causing
+`ValidationError` at test collection time before any test had a chance to run.
+
+**Decision:**  
+All `os.environ.setdefault` calls in `tests/conftest.py` must appear before any
+import of an `app.*` module. Imports that follow are annotated `# noqa: E402`
+to acknowledge the intentional import-after-statement pattern.
+
+Additionally, `app/db/session.py` must not pass `pool_size` or `max_overflow`
+to `create_async_engine` when `DATABASE_URL` is a SQLite URL. SQLite uses
+`StaticPool` which does not support connection-pool sizing arguments.
+
+**Consequences:**  
+- Unit tests can import `conftest.py` without a live database or real env vars.
+- SQLite in-memory (`sqlite+aiosqlite:///:memory:`) is a fully supported unit-test
+  URL with no configuration changes required.
+- Any new required `Settings` field must have a corresponding `setdefault` line
+  added to `conftest.py` in the same PR, or test collection will fail again.
+- A dialect check (`URL.startswith("sqlite")`) is now the canonical guard for
+  SQLite-incompatible engine kwargs. Do not add other PostgreSQL-specific args
+  without extending that guard.
+
+---
+
+## ADR-023 — Concurrent agent isolation via git worktrees
+
+**Date:** 2026-04-14 (PR #63, issue #2)  
+**Status:** Accepted
+
+**Context:**  
+Multiple AI agents and developers work on different issues in parallel on the
+same machine. Early sessions used `git checkout` inside the shared
+`/home/vic/careercore` working tree to switch branches between tasks. Because a
+worktree has exactly one HEAD, any `git checkout` there immediately changes the
+branch context for every process using that path — including other agents mid-
+implementation. This caused file edits to be stashed to the wrong branch, stash
+pops to introduce foreign changes, and repeated "wrong branch" surprises during
+`git status`.
+
+**Decision:**  
+Each concurrent unit of work (issue branch) gets its own git worktree:
+
+```bash
+git worktree add /home/vic/careercore-issue-{N} issue-{N}-{slug}
+```
+
+The naming convention is `/home/vic/careercore-issue-{N}` so worktrees are
+discoverable with `git worktree list` and unambiguously tied to an issue number.
+The shared main worktree at `/home/vic/careercore` is reserved for docs branches
+and short-lived operations that do not benefit from long-running isolation.
+
+All implementation work happens in the issue-specific worktree. `git push`
+operates from that worktree. No `git checkout` is run inside a worktree that
+another agent is actively using.
+
+**Consequences:**  
+- Each agent has a stable, isolated working tree; a branch switch by one agent
+  does not affect any other agent's state.
+- `git worktree list` provides a real-time map of all active work: which branches
+  are checked out where, and at which commits.
+- Stash-based branch hopping (`git stash / checkout / pop`) is no longer needed
+  and should not be used for issue isolation.
+- Worktrees left over after a PR merges should be removed with
+  `git worktree remove /path` to keep the list clean.
+
+---
+
+## ADR-024 — Job analysis persistence uses JSONB score breakdowns and DB-enforced match enums
+
+**Date:** 2026-04-14 (issue #22)  
+**Status:** Accepted
+
+**Context:**  
+The ORM already defined `JobAnalysis`, `MatchedRequirement`, and `MissingRequirement`, but the Alembic chain stopped before those tables existed. Issue `#22` had to make the migration history match the current persistence contract, including the database-level types that scoring and explanation layers expect to read later.
+
+**Decision:**  
+- `job_analyses` is persisted with FKs to both `job_descriptions.id` and `users.id`, each using `ON DELETE CASCADE`.  
+- `job_analyses.score_breakdown` uses PostgreSQL `JSONB`, matching the ORM model and preserving structured score output without flattening it into text columns.  
+- `matched_requirements.match_type` uses a PostgreSQL enum named `matchtype` with values `full`, `partial`, and `missing`.  
+- `matched_requirements` and `missing_requirements` each FK to `job_analyses.id` with `ON DELETE CASCADE`.  
+- The migration revision is `20260414_0004`, directly after `20260413_0003`.
+
+**Consequences:**  
+- A fresh database can now apply the migration chain and produce the same schema the scoring models already expect.  
+- `score_breakdown` remains structured and queryable as JSONB instead of becoming an opaque text blob.  
+- Match classification is enforced at the DB layer, so invalid `match_type` strings cannot be persisted by accident.  
+- Any future change to analysis persistence shape must update both the ORM and Alembic history in the same PR, not just one side.
+
+---
+
+## ADR-025 — AI provider methods return `tuple[result, TokenUsage]`; model names are config-driven
+
+**Date:** 2026-04-13 (issue #3)  
+**Status:** Accepted
+
+**Context:**  
+`AnthropicProvider._call()` already received token counts from the Anthropic SDK (`msg.usage.input_tokens`, `msg.usage.output_tokens`) but discarded them. `AICostService.log_call()` was designed to accept those values, but had no mechanism to receive them because the provider protocol returned bare result types. Separately, `AnthropicProvider` hardcoded model names (`claude-haiku-4-5-20251001`, `claude-sonnet-4-6`) as module-level constants, making model upgrades require a code change.
+
+**Decision:**  
+- All 6 `AIProvider` Protocol methods change their return type from `T` to `tuple[T, TokenUsage]`.  
+- `TokenUsage` is a new Pydantic model in `ai/schemas.py`: `prompt_tokens: int`, `completion_tokens: int`, `total_tokens: int`, `latency_ms: int`, `model: str`.  
+- `AnthropicProvider._call()` constructs a `TokenUsage` from `msg.usage` and a monotonic latency measurement and returns it alongside the content string.  
+- `MockAIProvider` returns `(result, _ZERO_USAGE)` where `_ZERO_USAGE` is a module-level `TokenUsage(prompt_tokens=0, ..., model="mock")` constant.  
+- Stub providers (`OllamaProvider`, `OpenAICompatibleProvider`) declare the tuple return type but continue to `raise NotImplementedError`.  
+- Model names move from module-level constants to `Settings.AI_HAIKU_MODEL` and `Settings.AI_SONNET_MODEL` with safe defaults; `AnthropicProvider.__init__` reads them via `settings`.
+
+**Consequences:**  
+- Every caller that destructures the tuple must acknowledge the usage value. It is no longer silently discarded.  
+- `AICostService.log_call()` can be wired up without any further protocol changes.  
+- Adding a new provider method requires returning `(result, TokenUsage)` — the Protocol contract enforces this at type-check time.  
+- Model names can be pinned per deployment environment via environment variables without touching application code.  
+- `MockAIProvider` satisfies the full contract and keeps all unit tests network-free; `_ZERO_USAGE` makes mock overhead negligible.  
+- The Protocol's tuple signatures are now the authoritative source for what every AI call must produce — change them only when `AICostService` or a new billing concern requires it.
+
+---
+
+## ADR-026 — Alembic revision order must match real schema dependencies
+
+**Date:** 2026-04-14 (backfill for PR #68, issue #21)  
+**Status:** Accepted
+
+**Context:**  
+The repository already contained migration `20260414_0004_create_job_analysis_tables`, but that revision depended on `job_descriptions` existing even though no earlier migration created `job_descriptions` or `job_requirements`. On a fresh database, that revision chain was invalid: later tables referenced objects that had never been created.
+
+**Decision:**  
+- `job_descriptions` and `job_requirements` are created in a dedicated prerequisite revision (`20260414_0003a`) before any job-analysis tables.  
+- `job_requirements.category` is enforced with a PostgreSQL enum (`jobrequirementcategory`) at the database layer, not as an application-only convention.  
+- Later migrations that depend on those tables must point their `down_revision` to the prerequisite job-schema revision, not skip over it.
+
+**Consequences:**  
+- A fresh Alembic upgrade path now creates the job schema in dependency order instead of relying on out-of-band table creation.  
+- Database integrity rules for job requirements live in the migration layer as well as the ORM layer; invalid category values are rejected before application code sees them.  
+- When a migration is added out of order, the fix is to repair the revision chain explicitly rather than silently assuming existing databases already contain the missing tables.

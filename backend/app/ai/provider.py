@@ -20,11 +20,9 @@ from app.ai.schemas import (
 class AIProvider(Protocol):
     """Defines the contract every AI backend must satisfy.
 
-    Implementations: MockProvider (tests), AnthropicProvider (production),
-    OpenAICompatibleProvider (Phase 2), OllamaProvider (Phase 3).
-
-    All methods are async. Callers must check the daily token budget
-    (via AICostService) before invoking any method and log the result afterward.
+    All methods return (result, TokenUsage). Callers must:
+      1. Call AICostService.check_budget() before invoking any method.
+      2. Call AICostService.log_call() with the returned TokenUsage afterward.
     """
 
     async def parse_job_description(self, raw_text: str) -> tuple[ParsedJD, TokenUsage]:
@@ -86,9 +84,7 @@ class AIProvider(Protocol):
         """
         ...
 
-    async def answer_followup(
-        self, question: FollowUpQuestion
-    ) -> tuple[FollowUpAnswer, TokenUsage]:
+    async def answer_followup(self, question: FollowUpQuestion) -> tuple[FollowUpAnswer, TokenUsage]:
         """Answer a user's follow-up question about their career analysis.
 
         Args:

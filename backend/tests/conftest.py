@@ -4,13 +4,13 @@ Test DB strategy:
   - Unit tests: SQLite in-memory (fast, no services needed)
   - Integration tests: PostgreSQL (requires TEST_DATABASE_URL env var)
 
-AI calls are always mocked — set AI_PROVIDER=mock before running tests
+AI calls are always mocked -- set AI_PROVIDER=mock before running tests
 or ensure it is set in the environment (it defaults to "mock" in Settings).
 """
 
 import os
 
-# ── Env vars MUST be set before any app module is imported ────────────────────
+# -- Env vars MUST be set before any app module is imported -------------------
 # app/db/session.py calls get_settings() at module level; if the required
 # vars are missing the import itself raises a ValidationError.
 os.environ.setdefault("AI_PROVIDER", "mock")
@@ -43,7 +43,7 @@ from app.models.user import User  # noqa: E402
 _TEST_DB_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 
 
-# ── Database fixtures ─────────────────────────────────────────────────────────
+# -- Database fixtures --------------------------------------------------------
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -67,7 +67,7 @@ async def db(test_engine) -> AsyncGenerator[AsyncSession, None]:  # type: ignore
         await session.rollback()
 
 
-# ── Application fixtures ──────────────────────────────────────────────────────
+# -- Application fixtures -----------------------------------------------------
 
 
 @pytest_asyncio.fixture
@@ -87,7 +87,7 @@ async def client(db: AsyncSession) -> AsyncGenerator[AsyncClient, None]:  # type
     app.dependency_overrides.clear()
 
 
-# ── Data fixtures ─────────────────────────────────────────────────────────────
+# -- Data fixtures ------------------------------------------------------------
 
 
 @pytest_asyncio.fixture

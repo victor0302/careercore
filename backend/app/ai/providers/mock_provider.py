@@ -43,102 +43,72 @@ class MockAIProvider:
 
     async def parse_job_description(self, raw_text: str) -> tuple[ParsedJD, TokenUsage]:
         """Return a fixed ParsedJD regardless of input text."""
-        return (
-            ParsedJD(
-                title="Software Engineer",
-                company="Acme Corp",
-                requirements=[
-                    JobRequirementItem(
-                        id=_MOCK_REQ_1_ID,
-                        text="3+ years of Python experience",
-                        category="skill",
-                        is_required=True,
-                    ),
-                    JobRequirementItem(
-                        id=_MOCK_REQ_2_ID,
-                        text="Experience with FastAPI or Django",
-                        category="tool",
-                        is_required=True,
-                    ),
-                    JobRequirementItem(
-                        id=_MOCK_REQ_3_ID,
-                        text="Familiarity with Docker",
-                        category="tool",
-                        is_required=False,
-                    ),
-                ],
-                summary="Mock job description summary for testing.",
-            ),
-            _ZERO_USAGE,
+        result = ParsedJD(
+            title="Software Engineer",
+            company="Acme Corp",
+            requirements=[
+                JobRequirementItem(id=_MOCK_REQ_1_ID, text="3+ years of Python experience", category="skill", is_required=True),
+                JobRequirementItem(id=_MOCK_REQ_2_ID, text="Experience with FastAPI or Django", category="tool", is_required=True),
+                JobRequirementItem(id=_MOCK_REQ_3_ID, text="Familiarity with Docker", category="tool", is_required=False),
+            ],
+            summary="Mock job description summary for testing.",
         )
+        return result, _ZERO_USAGE
 
     async def generate_bullets(
         self, contexts: list[BulletContext], max_bullets: int = 5
     ) -> tuple[list[GeneratedBullet], TokenUsage]:
         """Return one deterministic bullet per context (up to max_bullets)."""
-        bullets: list[GeneratedBullet] = []
-        for ctx in contexts[:max_bullets]:
-            bullets.append(
-                GeneratedBullet(
-                    text=(
-                        f"Delivered measurable results in {ctx.target_requirement.category} "
-                        f"by applying expertise from {ctx.profile_entity_type}."
-                    ),
-                    evidence_entity_type=ctx.profile_entity_type,
-                    evidence_entity_id=ctx.profile_entity_id,
-                    confidence=0.85,
-                )
+        bullets = [
+            GeneratedBullet(
+                text=f"Delivered measurable results in {c.target_requirement.category} by applying expertise from {c.profile_entity_type}.",
+                evidence_entity_type=c.profile_entity_type,
+                evidence_entity_id=c.profile_entity_id,
+                confidence=0.85,
             )
+            for c in contexts[:max_bullets]
+        ]
         return bullets, _ZERO_USAGE
 
     async def explain_score(
         self, breakdown: ScoreBreakdown, job_title: str
     ) -> tuple[ScoreExplanation, TokenUsage]:
         """Return a deterministic score explanation."""
-        return (
-            ScoreExplanation(
-                headline=f"Your profile is a strong match for {job_title} at {breakdown.total_score:.0f}/100.",
-                strengths=["Strong technical skill alignment", "Relevant project experience"],
-                gaps=["Missing: cloud infrastructure experience"],
-                recommendation="Consider adding a cloud project to your profile to close the main gap.",
-            ),
-            _ZERO_USAGE,
+        result = ScoreExplanation(
+            headline=f"Your profile is a strong match for {job_title} at {breakdown.total_score:.0f}/100.",
+            strengths=["Strong technical skill alignment", "Relevant project experience"],
+            gaps=["Missing: cloud infrastructure experience"],
+            recommendation="Consider adding a cloud project to your profile to close the main gap.",
         )
+        return result, _ZERO_USAGE
 
-    async def answer_followup(
-        self, question: FollowUpQuestion
-    ) -> tuple[FollowUpAnswer, TokenUsage]:
+    async def answer_followup(self, question: FollowUpQuestion) -> tuple[FollowUpAnswer, TokenUsage]:
         """Return a deterministic follow-up answer."""
-        return (
-            FollowUpAnswer(
-                answer=f"Mock answer to: {question.question}",
-                sources=["work_experience", "skill"],
-            ),
-            _ZERO_USAGE,
+        result = FollowUpAnswer(
+            answer=f"Mock answer to: {question.question}",
+            sources=["work_experience", "skill"],
         )
+        return result, _ZERO_USAGE
 
     async def generate_recommendations(
         self, context: GapContext
     ) -> tuple[RecommendationSummary, TokenUsage]:
         """Return deterministic recommendations for each missing requirement."""
-        recs: list[RecommendationContext] = []
-        for req in context.missing_requirements:
-            recs.append(
-                RecommendationContext(
-                    requirement=req,
-                    action_type="learn",
-                    action_description=f"Study and practice {req.text} through hands-on projects.",
-                    estimated_effort="2-4 weeks",
-                    resources=["Official documentation", "Relevant online courses"],
-                )
+        recs = [
+            RecommendationContext(
+                requirement=req,
+                action_type="learn",
+                action_description=f"Study and practice {req.text} through hands-on projects.",
+                estimated_effort="2-4 weeks",
+                resources=["Official documentation", "Relevant online courses"],
             )
-        return (
-            RecommendationSummary(
-                recommendations=recs,
-                priority_order=[str(r.requirement.id) for r in recs],
-            ),
-            _ZERO_USAGE,
+            for req in context.missing_requirements
+        ]
+        result = RecommendationSummary(
+            recommendations=recs,
+            priority_order=[str(r.requirement.id) for r in recs],
         )
+        return result, _ZERO_USAGE
 
     async def generate_learning_plan(
         self, recommendations: RecommendationSummary, timeline_weeks: int = 12

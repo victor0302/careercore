@@ -39,9 +39,7 @@ class OllamaProvider:
     ) -> tuple[ScoreExplanation, TokenUsage]:
         raise NotImplementedError("Phase 3")
 
-    async def answer_followup(
-        self, question: FollowUpQuestion
-    ) -> tuple[FollowUpAnswer, TokenUsage]:
+    async def answer_followup(self, question: FollowUpQuestion) -> tuple[FollowUpAnswer, TokenUsage]:
         raise NotImplementedError("Phase 3")
 
     async def generate_recommendations(

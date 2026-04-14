@@ -13,6 +13,23 @@ EvidenceSourceType: TypeAlias = Literal[
 RecommendationActionType: TypeAlias = Literal["learn", "project", "certification", "reframe"]
 
 
+
+# ── Provider call metadata ───────────────────────────────────────────────
+
+
+class TokenUsage(BaseModel):
+    """Token counts and latency returned alongside every AI provider result.
+
+    Callers pass this to AICostService.log_call() so every call is accounted for.
+    """
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    latency_ms: int
+    model: str
+
+
 # ── Job Description Parsing ───────────────────────────────────────────────────
 
 
