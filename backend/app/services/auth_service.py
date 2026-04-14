@@ -114,3 +114,22 @@ class AuthService:
             access_token=create_access_token(str(user.id)),
             refresh_token=new_refresh_token,
         )
+
+    async def logout(self, user_id: uuid.UUID) -> None:
+        """Invalidate all active refresh tokens for *user_id*.
+
+        Sets ``used_at`` to now on every token that is still valid (not yet
+        used and not expired).  This prevents any existing refresh token from
+        being exchanged after logout, regardless of which device it came from.
+        """
+        now = datetime.now(tz=timezone.utc)
+        result = await self._db.execute(
+            select(RefreshToken).where(
+                RefreshToken.user_id == user_id,
+                RefreshToken.used_at.is_(None),
+                RefreshToken.expires_at > now,
+            )
+        )
+        for token in result.scalars().all():
+            token.used_at = now
+        await self._db.flush()
