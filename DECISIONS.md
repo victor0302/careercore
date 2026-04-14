@@ -745,3 +745,27 @@ directly (ADR-012).
 - Omitting `created_at` when calling `AuditLog(...)` directly will produce a
   database error rather than silently recording the wrong time. This makes the
   invariant self-enforcing.
+
+---
+
+## ADR-031 — File uploads use opaque object keys and queue extraction only after storage succeeds
+
+**Date:** 2026-04-14 (issue #18)  
+**Status:** Accepted
+
+**Context:**  
+The initial upload flow accepted files and persisted `UploadedFile`, but the hardening rules were incomplete: storage keys still embedded the original filename, validation lived only in the endpoint, and extraction work was not enqueued after a successful upload. That left the object-store path more revealing than necessary and made the upload lifecycle contract weaker than the model and worker design implied.
+
+**Decision:**  
+- `FileService.upload()` owns upload validation for allowed MIME types and the 10 MB size limit.  
+- Object storage keys are opaque UUID-based paths and must not include the original filename. The filename is stored only in `UploadedFile.original_filename`.  
+- `UploadedFile` rows are created in `pending` state after successful object storage.  
+- Extraction is queued only after storage succeeds and the `UploadedFile` row has been flushed.  
+- The upload endpoint maps service validation failures to HTTP:
+  - unsupported MIME type → `415`
+  - oversized payload → `413`
+
+**Consequences:**  
+- Object-storage paths no longer leak user-supplied filenames.  
+- Upload validation, persistence, and queue-triggering are enforced in one service boundary instead of being split across transport-only code.  
+- The upload lifecycle is now explicit: store object, persist `pending` metadata, enqueue extraction. Full extraction processing remains separate worker-scope work.
