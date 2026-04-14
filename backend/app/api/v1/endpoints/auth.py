@@ -109,6 +109,28 @@ async def refresh(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
 
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    request: Request,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Invalidate all active refresh tokens and clear the refresh cookie."""
+    service = AuthService(db)
+    audit = AuditService(db)
+    await service.logout(current_user.id)
+    response.delete_cookie(key="refresh_token", path="/api/v1/auth")
+    await audit.log_event(
+        action="user.logout",
+        ip_address=request.client.host if request.client else "unknown",
+        user_agent=request.headers.get("user-agent", ""),
+        user_id=current_user.id,
+        entity_type="User",
+        entity_id=current_user.id,
+    )
+
 @router.get("/me", response_model=UserRead)
 async def me(
     current_user: User = Depends(get_current_user),
