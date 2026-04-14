@@ -3,7 +3,6 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user
@@ -21,9 +20,8 @@ async def list_skills(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[SkillRead]:
-    profile = await ProfileService(db).get_or_create(current_user.id)
-    result = await db.execute(select(Skill).where(Skill.profile_id == profile.id))
-    return [SkillRead.model_validate(s) for s in result.scalars().all()]
+    skills = await ProfileService(db).list_child_entities_for_user(Skill, current_user.id)
+    return [SkillRead.model_validate(s) for s in skills]
 
 
 @router.post("", response_model=SkillRead, status_code=status.HTTP_201_CREATED)
@@ -49,13 +47,16 @@ async def update_skill(
     db: AsyncSession = Depends(get_db),
 ) -> SkillRead:
     profile_service = ProfileService(db)
-    profile = await profile_service.get_or_create(current_user.id)
-    result = await db.execute(
-        select(Skill).where(Skill.id == skill_id, Skill.profile_id == profile.id)
+    skill, exists_elsewhere = await profile_service.get_child_entity_access(
+        Skill,
+        current_user.id,
+        skill_id,
     )
-    skill = result.scalar_one_or_none()
     if skill is None:
+        if exists_elsewhere:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden.")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found.")
+    profile = await profile_service.get_or_create(current_user.id)
     for field, value in data.model_dump(exclude_none=True).items():
         setattr(skill, field, value)
     await db.flush()
@@ -70,13 +71,16 @@ async def delete_skill(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     profile_service = ProfileService(db)
-    profile = await profile_service.get_or_create(current_user.id)
-    result = await db.execute(
-        select(Skill).where(Skill.id == skill_id, Skill.profile_id == profile.id)
+    skill, exists_elsewhere = await profile_service.get_child_entity_access(
+        Skill,
+        current_user.id,
+        skill_id,
     )
-    skill = result.scalar_one_or_none()
     if skill is None:
+        if exists_elsewhere:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden.")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found.")
+    profile = await profile_service.get_or_create(current_user.id)
     await db.delete(skill)
     await db.flush()
     await profile_service.recalculate_completeness(profile)
