@@ -58,12 +58,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 def create_app() -> FastAPI:
+    docs_url = None if settings.is_production else "/docs"
+    redoc_url = None if settings.is_production else "/redoc"
+    openapi_url = None if settings.is_production else "/openapi.json"
+
     app = FastAPI(
         title="CareerCore API",
         description="AI Career Intelligence Platform",
         version=settings.APP_VERSION,
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
         lifespan=lifespan,
     )
 
@@ -94,7 +99,6 @@ def create_app() -> FastAPI:
                 "request_id": request_id,
             },
         )
-
     # Routes
     app.include_router(v1_router, prefix="/api/v1")
 

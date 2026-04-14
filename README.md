@@ -77,6 +77,25 @@ careercore/
 - [Backend API Docs](http://localhost:8000/docs) (when running)
 - [Environment Variables](.env.example)
 
+## Route Access
+
+CareerCore uses a default-deny API boundary: every non-public route must depend
+on `get_current_user` and reject missing, invalid, or expired access tokens
+with `401 Unauthorized`.
+
+Public exceptions:
+- `GET /health`
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/refresh`
+
+Development-only public routes:
+- `GET /docs`
+- `GET /redoc`
+- `GET /openapi.json`
+
+All other API routes are protected.
+
 ---
 
 ## Running Tests

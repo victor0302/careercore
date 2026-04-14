@@ -19,4 +19,5 @@ async def test_me_returns_current_user(client, mock_user) -> None:
 
 async def test_me_requires_auth(client) -> None:
     response = await client.get("/api/v1/auth/me")
-    assert response.status_code == 403
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Could not validate credentials"
