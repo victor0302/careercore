@@ -684,3 +684,34 @@ Phase 1 already had an `UploadedFile` ORM model with file metadata, processing s
 - The API, ORM, and migration now describe the same WorkExperience persistence contract.  
 - File-derived work experiences can be linked safely without creating an IDOR path through cross-user file UUIDs.  
 - Deleting an uploaded file severs the reference without deleting the work-experience record, and the API can also clear that link intentionally.
+
+---
+
+## ADR-030 — Audit log `created_at` is application-set, not server-defaulted
+
+**Date:** 2026-04-14 (PR #76, issue #39)  
+**Status:** Accepted
+
+**Context:**  
+Most timestamp columns in this codebase carry `server_default=sa.text("now()")` so
+the database fills in the value if the application omits it. `AuditLog.created_at`
+was already defined in the ORM without a server default, but the migration needed
+to make that choice explicit.
+
+**Decision:**  
+`audit_logs.created_at` is `TIMESTAMP WITH TIME ZONE NOT NULL` with no
+`server_default`. `AuditService.log_event()` is responsible for setting the
+value before the row is flushed. No other code path writes to `audit_logs`
+directly (ADR-012).
+
+**Consequences:**  
+- The recorded timestamp reflects when the application observed the event, not
+  when the database committed the transaction. For long-running transactions this
+  is the meaningful distinction: `now()` returns commit time; an explicit
+  application timestamp returns event time.  
+- `AuditService.log_event()` is the single point that controls what "now" means
+  for audit purposes. If the service is ever extended to accept a caller-supplied
+  timestamp (e.g. for backfilling), that is one change in one place.  
+- Omitting `created_at` when calling `AuditLog(...)` directly will produce a
+  database error rather than silently recording the wrong time. This makes the
+  invariant self-enforcing.
