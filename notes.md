@@ -773,3 +773,384 @@ Every new endpoint must:
 - Write to the audit log for state-changing operations
 - Check `AICostService.check_budget()` before any AI call
 - Use `MockAIProvider` in all tests (`AI_PROVIDER=mock`)
+
+---
+
+## 11. Delivery workflow we established
+
+This section documents the operating workflow used to turn the scaffold into a
+real team project. These are not administrative details. They are part of the
+engineering system because they determine whether future changes are reviewable,
+isolated, and safe to merge.
+
+### 11.1 Why the repo had to be bootstrapped before feature work
+
+The local `careercore/` directory initially was **not** a git repository.
+Until that was fixed, there was no meaningful way to do feature branches or PRs.
+
+The first sequence was:
+1. Initialize git locally
+2. Create the GitHub repo
+3. Create and push `main`
+4. Commit the scaffold as the baseline
+
+Why do this before touching tickets?
+
+Because feature work only makes sense relative to a stable base. If you do
+"initial import + feature implementation" in the same history step, you destroy
+the review boundary. Reviewers cannot tell what belongs to the system baseline
+and what belongs to the new feature.
+
+The rule is:
+
+```
+baseline first
+→ ticket branch second
+→ narrow PR third
+```
+
+### 11.2 Why the issue backlog was normalized before implementation
+
+The original ticket list described the product reasonably well, but parts of it
+did not match the codebase exactly.
+
+Examples:
+- The code used `Profile`, while some draft ticket wording still said `MasterProfile`
+- The AI provider contract already used `answer_followup` and
+  `generate_recommendations`
+- Some files already existed, so the real work was "finish and harden" rather
+  than "create from scratch"
+
+Why normalize this instead of leaving it alone?
+
+Because issues are the team's shared vocabulary. If the tracker and the code
+use different terms, the project splits into two mental models. That creates
+misnamed branches, confusing PRs, and duplicated work.
+
+Normalizing the backlog aligned:
+- GitHub issues
+- branch names
+- PR titles
+- code terminology
+- review expectations
+
+This is a high-leverage move because once the tracker is clean, all downstream
+communication gets cleaner too.
+
+### 11.3 Why GitHub Projects was kept deliberately small
+
+The `CareerCore Phase 1` project board was created with:
+- the default `Status` field
+- one added `Priority` field with `P1`, `P2`, `P3`
+
+Why not build a complex workflow?
+
+Because small teams do not fail from lack of tooling sophistication; they fail
+from inconsistent execution. A board with too many custom fields becomes stale
+because nobody wants to maintain it. A small board gets used.
+
+The chosen board answers only the two questions that matter most:
+- What stage is this in?
+- What should we pull next?
+
+That is enough for a capstone team.
+
+### 11.4 The issue execution workflow
+
+For every ticket, the operating sequence became:
+
+1. Confirm dependent PRs are merged
+2. Update local `main` from GitHub
+3. Assign the issue
+4. Move it to `In Progress`
+5. Create a dedicated branch from `main`
+6. Implement only the issue scope
+7. Run the best available checks
+8. Commit with a narrow message
+9. Push the branch
+10. Open a PR with `Closes #<issue>`
+
+This is not bureaucracy. It protects review quality.
+
+**Assignment** prevents two people silently choosing the same work.
+
+**Project status movement** turns the board into a coordination tool rather than
+a decorative backlog.
+
+**One issue = one branch = one PR** is the key review boundary. Once that rule
+is broken, unrelated changes start hitchhiking in the same PR.
+
+---
+
+## 12. What we implemented this session and why
+
+The first tickets completed in this session were:
+- `#1` AI provider contract alignment
+- `#5` initial auth/core Alembic migration
+- `#6` hardened registration flow
+- `#7` hardened login flow with cookie-backed refresh
+- `#8` refresh token persistence and rotation
+
+These were chosen in this order because they form the auth foundation.
+
+### 12.1 Issue #1 — Align AI provider contract and schema contract
+
+This was intentionally a small, foundational ticket.
+
+What changed:
+- tightened typing in `backend/app/ai/schemas.py`
+- added a contract-oriented unit test for the provider protocol
+
+Why start here?
+
+Because the AI provider interface is a coordination boundary. Multiple future
+tickets depend on those types and method names staying coherent. If the
+contract drifts early, every later AI feature becomes more expensive to build.
+
+This was the right first ticket because it was:
+- low risk
+- foundational
+- narrow in scope
+
+### 12.2 Issue #5 — Add the initial users migration
+
+The code already had a `User` model, but without migration history the schema
+was not durable. ORM definitions without migrations are just intent, not an
+operational database design.
+
+What changed:
+- first Alembic revision created the `users` table
+- created the `usertier` enum
+- established UUID PKs and email uniqueness/indexing
+
+Why keep the first migration small?
+
+Because the first revision defines the base of the migration chain. A noisy
+first migration is painful to reason about later. Starting with `users` only
+made the base easy to understand and safe to extend.
+
+### 12.3 Issue #6 — Harden registration flow
+
+This was the first real auth behavior ticket.
+
+What changed:
+- stronger password validation in the request schema
+- bcrypt cost explicitly pinned to 12
+- `Profile` is auto-created on successful registration
+- register response narrowed to only `id` and `email`
+- integration tests added for success, duplicate email, and weak password
+
+Why this mattered:
+
+Registration is the auth root. If account creation is loose or inconsistent,
+everything layered on top of it inherits that instability.
+
+Why auto-create `Profile`?
+
+Because the profile is not optional in the application model. It may be empty,
+but it should exist. Creating it at registration time lets downstream services
+assume the user already has a root profile object. That removes `None`-handling
+complexity from the rest of the system.
+
+Why narrow the response?
+
+Public API contracts should be as small as possible. If the frontend only needs
+`id` and `email`, returning `is_active`, `tier`, or other extra fields just
+expands the surface area you are forced to support forever.
+
+### 12.4 Issue #7 — Harden login flow with cookie-backed refresh
+
+The next step was to clean up the login contract.
+
+What changed:
+- login returns only the access token in the response body
+- refresh token is now set as an `HttpOnly` cookie
+- failed login attempts write audit log entries
+- wrong email and wrong password return the same `401`
+- frontend auth flow was updated to store only the access token client-side
+- refresh moved to cookie-backed usage so the frontend flow remained coherent
+
+Why move refresh tokens into cookies?
+
+Because refresh tokens are long-lived credentials. Storing them in JavaScript-
+accessible storage (`localStorage`) increases exposure. An `HttpOnly` cookie is
+not a complete security solution on its own, but it is materially better than
+placing the refresh token in application-visible state.
+
+Why change frontend code in the same ticket?
+
+Because backend contract changes that are not reflected in the client are not
+real changes; they are breakages waiting to happen. When login stopped
+returning `refresh_token` in the body, the frontend needed to stop expecting it
+immediately.
+
+### 12.5 Issue #8 — Refresh token persistence and rotation
+
+This ticket turned the cookie-backed refresh flow into an actually defensible
+session model.
+
+What changed:
+- added a persisted `RefreshToken` model
+- added Alembic migration for the `refresh_tokens` table
+- refresh tokens are stored as **hashes**, not plaintext
+- login now stores the issued refresh token server-side
+- refresh now validates the stored token record
+- used tokens are marked as spent
+- refresh rotates to a newly issued token and updates the cookie
+- replayed tokens return `401`
+- integration tests cover rotation and replay prevention
+
+Why store the hash instead of the raw token?
+
+For the same reason passwords are hashed: if the database is exposed, plaintext
+long-lived credentials should not be sitting there ready to use. Hashing a
+refresh token means the DB can validate it without retaining the credential in
+reusable form.
+
+Why track `used_at`?
+
+Because rotation is really a replay-defense mechanism. The old token should not
+just become "stale"; it should become explicitly invalid because it has been
+consumed. `used_at` records that state transition and makes replay detection
+deterministic.
+
+Why do this in the database rather than Redis immediately?
+
+Database persistence is the simpler Phase 1 solution. It is slower than an
+ideal Redis-based implementation, but much easier to reason about. The point of
+Phase 1 is to establish correct behavior first. Performance optimization can
+come after correctness.
+
+### 12.6 Why we stopped and recovered when the branch context became ambiguous
+
+At one point, `#8` work appeared on an unexpected branch (`fix-c3-idor-auth-me`)
+instead of the intended issue branch. This was not catastrophic, but it was a
+real process risk.
+
+Why stop instead of just continuing?
+
+Because branch identity is part of the review boundary. If the current branch is
+not the branch you think it is, you can no longer trust the diff to represent
+only the ticket you are working on.
+
+The recovery process was:
+1. Identify the exact `#8` files
+2. Stash only those files
+3. Update `main` to the newest merged state
+4. Recreate `issue-8-refresh-token-rotation` from current `main`
+5. Reapply only the `#8` work there
+
+This is the right recovery method because it preserves the ticket-scoped diff
+instead of dragging unknown branch context into the PR.
+
+### 12.7 Why verification notes were explicit about missing tooling
+
+In this shell, `pytest` was not available. Rather than pretending the tests had
+run, each PR explicitly stated:
+- what syntax or static checks did run
+- what full test command did **not** run
+- why it did not run
+
+This is senior-engineering behavior. Honest verification notes are more useful
+than vague claims of "tested." A reviewer needs to know exactly what confidence
+they are getting from a PR.
+
+### 12.8 Why `notes.md` became a key handoff document
+
+By this point, the project has crossed from "scaffold" into "actively evolving
+system." That is exactly when architecture starts becoming tribal knowledge.
+
+`notes.md` now serves three purposes:
+- architectural memory
+- workflow memory
+- handoff memory
+
+That is important because future sessions or contributors should not have to
+reconstruct the rationale behind:
+- the issue workflow
+- the auth design
+- the migration chain
+- the frontend/backend contract decisions
+
+If the code shows **what** changed, this document should explain **why**.
+
+### 12.9 Practical rule for the next tickets
+
+The next auth tickets should follow the same discipline:
+
+1. Ensure the previous dependent PR is merged
+2. Sync local `main`
+3. Branch cleanly from `main`
+4. Keep the diff scoped to one ticket
+5. Push and open a PR immediately after the feature is coherent
+
+The remaining useful lesson is simple:
+
+```
+When process boundaries stay clean,
+code review stays useful.
+When code review stays useful,
+the system stays coherent.
+```
+
+### 12.10 Issue #12 — Profile and sub-entity migrations
+
+This ticket completed the database side of the master profile model.
+
+What changed:
+- Added migration `20260413_0003` creating `profiles`, `work_experiences`,
+  `projects`, `skills`, and `certifications` tables
+- `profiles.user_id` uses a `UNIQUE` FK → `users.id CASCADE` to enforce the
+  1:1 user–profile relationship at the database level
+- All sub-entity tables use FK → `profiles.id ON DELETE CASCADE` so deleting a
+  profile atomically removes all child rows
+- `source_file_id` on `work_experiences` and `projects` uses `SET NULL` (not
+  `CASCADE`) because a deleted uploaded file does not mean the work experience
+  should disappear — only the source link
+- `bullets` is stored as `JSONB` (ordered list of strings with potential future
+  structure); `skill_tags`, `tool_tags`, `domain_tags` are `ARRAY(String)`
+  (flat unordered sets of text labels — no need for JSONB overhead)
+- Unit tests cover the revision chain, 1:1 uniqueness constraint, and all four
+  sub-entity FK relationships using the shared SQLite fixture
+- JSONB/ARRAY column behavior is tested only in CI (PostgreSQL) per ADR-014
+
+Why `UNIQUE` on `profiles.user_id` instead of a separate one-to-one table?
+
+A separate table would be correct in a relational textbook, but adds no
+practical benefit here. The `UNIQUE` constraint on the FK column is the
+PostgreSQL-idiomatic way to enforce a 1:1 relationship. It is simpler,
+enforced at the database level, and works correctly with `ON DELETE CASCADE`.
+
+Why `JSONB` for bullets but `ARRAY(String)` for tags?
+
+Bullets are a list of rich strings that may gain metadata (confidence score,
+source sentence) in Phase 2 — JSONB leaves room to evolve the element schema
+without a migration. Tags are flat string sets with no expected sub-structure —
+`ARRAY(String)` is lighter and semantically correct.
+
+Why put revision chain tests in unit tests instead of a separate check?
+
+Because the migration file itself is just a Python module. Importing it and
+asserting `revision`, `down_revision`, and `callable(upgrade)` is a free,
+zero-dependency guard that CI runs without a database. If a future migration
+accidentally sets the wrong `down_revision`, this test catches it before the
+chain breaks in production.
+
+### 12.11 Branch recovery after commit landed on wrong branch
+
+During the `#12` session, a commit was accidentally made to `issue-2-harden-mockai`
+instead of `issue-12-profile-migrations`. This happened because `git checkout -b`
+created the branch but a subsequent shell CWD shift caused later `git` calls to
+operate on a different branch.
+
+Recovery:
+1. Note the commit hash (`585459f`)
+2. Force-move `issue-12-profile-migrations` to that hash (`git branch -f`)
+3. Force-reset `issue-2-harden-mockai` back to its original tip (`git branch -f`)
+4. Push `issue-12-profile-migrations` to origin
+
+Why not cherry-pick?
+
+Cherry-pick would have created a duplicate commit object. Since `585459f` had
+the correct parent (`752a082` = current `main`), moving the branch pointer
+directly was cleaner — one commit, one branch, no duplicate history.

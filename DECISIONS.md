@@ -264,6 +264,32 @@ Ownership is enforced at the service boundary, not the endpoint boundary. Endpoi
 
 ---
 
+## ADR-017 — Profile schema: UNIQUE FK for 1:1, JSONB vs ARRAY column choice
+
+**Date:** 2026-04-13 (PR #56, issue #12)  
+**Status:** Accepted
+
+**Context:**  
+The `Profile` model has a 1:1 relationship to `User`. Sub-entity tables (`work_experiences`, `projects`) store both structured AI-extracted bullet lists and flat text tags. Two design questions arose when writing migration `20260413_0003`:
+
+1. How to enforce the 1:1 user–profile relationship at the database level.
+2. Whether to use `JSONB` or `ARRAY(String)` for per-row list columns.
+
+**Decision:**
+
+- **1:1 enforcement:** `profiles.user_id` is a FK to `users.id` with a `UNIQUE` constraint. No separate join table.
+- **Bullets** (`work_experiences.bullets`, `projects.bullets`): `JSONB`. Ordered list of strings today; may gain element-level metadata (confidence, source offset) in Phase 2 without requiring a new migration.
+- **Tag columns** (`skill_tags`, `tool_tags`, `domain_tags`): `ARRAY(String)`. Flat unordered sets of text labels with no anticipated sub-structure.
+- **Sub-entity FK delete behavior:** `profile_id` → `CASCADE` (deleting a profile removes all child rows). `source_file_id` → `SET NULL` (deleting an uploaded file severs the source link but preserves the work experience or project record).
+
+**Consequences:**  
+- The 1:1 constraint is enforced by the database; application code cannot accidentally create two profiles for one user.  
+- `JSONB` gives bullets room to evolve their element schema; `ARRAY(String)` keeps tag columns simple and avoids JSONB overhead for flat data.  
+- `SET NULL` on `source_file_id` means file deletion is safe to perform without cascading content loss.  
+- `ARRAY` and `JSONB` columns are PostgreSQL-only; tests involving those types must run against PostgreSQL (integration tests), not SQLite.
+
+---
+
 ## ADR-014 — Test strategy: SQLite unit tests, PostgreSQL integration tests
 
 **Date:** 2026-04-13  
