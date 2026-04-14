@@ -845,3 +845,45 @@ not ad hoc endpoint guards.
   as transport-level contract behavior rather than business-logic side effects.  
 - Schema and persistence drift becomes more visible: if a column is meant to be
   bounded or required, the API schema should say so explicitly.  
+
+---
+
+## ADR-034 — Extraction workers update `UploadedFile` in place and preserve the row on failure
+
+**Date:** 2026-04-14 (issue #19)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#18` established the upload-side contract: store the object, persist an
+`UploadedFile` row in `pending`, then enqueue extraction. Issue `#19` completed
+the worker-side half of that lifecycle. The remaining design question was where
+extraction state and failure details should live, and how aggressive retry
+behavior should be.
+
+**Decision:**  
+- `extract_file_text` reads object bytes through the existing file/storage
+  service layer rather than opening a parallel storage path inside the worker.  
+- Supported extraction types are `application/pdf`, DOCX, and plain text, using
+  `pypdf`, `python-docx`, and UTF-8 decoding respectively.  
+- The worker updates the existing `UploadedFile` row in place:
+  - `pending -> processing -> ready` on success
+  - `pending|processing -> error` on terminal failure
+- Successful extraction writes plain text into `UploadedFile.extracted_text`.  
+- Failures do not delete or replace the `UploadedFile` row; they persist
+  `status=error` and `error_message` on that same row.  
+- Retry behavior is limited to transient infrastructure/application failures
+  (for example storage download or DB commit failures). Exhausted retries end
+  in a persisted `error` state.
+
+**Consequences:**  
+- File extraction remains a single-row lifecycle: metadata, extracted text, and
+  terminal error state all live on `uploaded_files` instead of being split
+  across ad hoc worker-only storage.  
+- The upload pipeline is resumable and inspectable: operators can tell whether a
+  file is queued, running, completed, or failed by reading one row.  
+- A failed extraction does not orphan object storage or erase evidence that the
+  upload happened; downstream code can distinguish "never processed" from
+  "processed and failed."  
+- If richer extraction telemetry is needed later, it should be introduced as an
+  explicit new model/migration, not smuggled into the worker as undocumented
+  side storage.

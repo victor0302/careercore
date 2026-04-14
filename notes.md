@@ -2771,3 +2771,97 @@ If a model column has a meaningful max length or a field must not be blank,
 capture that in the request schema explicitly. Otherwise the API contract is
 underspecified and you will rediscover the same bug later through a different
 endpoint or a less readable database failure.
+
+### 12.30 Issue #19 — Complete async extraction workflow and structured parsing
+
+This ticket finished the other half of the file-upload contract.
+
+Issue `#18` made the upload path reliable: validate, store the object, persist
+an `UploadedFile` row in `pending`, and enqueue extraction. Issue `#19` was the
+worker-side completion of that design. The point was not to build a new file
+subsystem. The point was to make the existing `UploadedFile` lifecycle real.
+
+What changed:
+- replaced the extraction-task stub with real worker behavior in
+  `extraction_tasks.py`
+- the worker now loads the `UploadedFile` row, marks it `processing`, downloads
+  bytes through the existing file/storage layer, extracts text, writes
+  `extracted_text`, and marks the row `ready`
+- supported parsing paths now exist for:
+  - PDF via `pypdf.PdfReader`
+  - DOCX via `python-docx`
+  - TXT via UTF-8 decode
+- terminal failures now leave the row in place and persist:
+  - `status=error`
+  - `error_message=<failure details>`
+- added focused unit coverage for:
+  - parser dispatch by content type
+  - `processing -> ready` state transitions
+  - retry behavior on transient failures
+  - final `error` persistence after retries are exhausted
+
+Why implement it this way?
+
+Because the existing model already told us what the right shape was.
+
+`UploadedFile` already had:
+- `status`
+- `extracted_text`
+- `error_message`
+
+That is a strong signal that extraction state belongs on the row itself, not in
+an undocumented side table or in Celery-only ephemeral state. The worker’s job
+here is to make that existing contract true.
+
+Why read file bytes through the service/storage layer instead of creating a
+direct MinIO client inside the task?
+
+Because storage access is infrastructure behavior, not parsing behavior.
+
+If the worker opens its own separate storage path with duplicated bucket/client
+logic, you now have two places that define how file bytes are retrieved. That
+creates drift very quickly. The task should own extraction state transitions and
+parser dispatch, not a second independent storage contract.
+
+Important tradeoffs:
+
+This implementation keeps retry behavior narrow on purpose. The worker retries
+transient infrastructure/application failures and, once retries are exhausted,
+records a terminal `error` state on the same row. It does not introduce object
+cleanup policy, dead-letter handling, or a new extraction-events table. Those
+may be valid future additions, but they are separate product decisions and
+deserve explicit schema/design treatment if they happen.
+
+The parsing logic is also intentionally pragmatic rather than clever. PDF,
+DOCX, and TXT are handled directly with the libraries already chosen by the
+project. There is no OCR layer, MIME sniffing expansion, or heuristic cleanup
+beyond extracting readable text. That is correct for this ticket because the
+issue was about completing the worker contract, not inventing a document-intel
+platform.
+
+Real implementation/testing issue:
+
+The shared `/home/vic/careercore` path was not a safe main worktree when this
+issue started, so the work was moved immediately into a dedicated clean
+worktree from `origin/main`. That avoided replaying the exact branch/worktree
+interference ADR-023 is meant to prevent.
+
+The focused worker tests also surfaced a subtle test-seam problem: the bound
+Celery task proxy is not convenient to patch directly for retry-state
+simulation. The correct fix was to test the underlying task behavior and keep
+the assertions about our retry/error logic, rather than turning the ticket into
+a Celery internals exercise.
+
+What future contributors should understand:
+
+If extraction fails, preserve the `UploadedFile` row and make the failure
+visible on that row. Do not “clean up” by deleting the metadata record. The row
+is the durable source of truth for what happened to the upload.
+
+Also, if you extend supported file types, update all three parts together:
+- worker parser dispatch
+- tests
+- any upload validation contract that governs allowed types
+
+Changing only one of those layers creates exactly the kind of drift this ticket
+was meant to close.
