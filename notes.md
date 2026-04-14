@@ -2368,3 +2368,92 @@ together. Do not add extraction-history concepts to Alembic without a matching
 ORM change, and do not add ORM fields without a migration. For Phase 1, the
 persistence rule is explicit: file metadata, processing state, and extracted
 text live on the same row.
+
+### 12.25 Issue #13 — WorkExperience model, schema, and migration coverage
+
+This ticket was not about inventing new WorkExperience features. The model and
+profile migration already existed. The real problem was contract drift: the ORM
+said a work experience could optionally link back to an uploaded file, but the
+schemas and API layer did not fully honor that shape.
+
+What changed:
+- added `source_file_id` to:
+  - `WorkExperienceCreate`
+  - `WorkExperienceRead`
+  - `WorkExperienceUpdate`
+- updated the work-experience endpoints so create and update validate
+  `source_file_id` ownership through `FileService.get_for_user()`
+- changed PATCH handling to use `exclude_unset=True` so nullable fields can be
+  explicitly cleared instead of being silently ignored
+- added focused unit coverage in
+  `backend/tests/unit/test_work_experience_contract.py` for:
+  - schema alignment around `source_file_id`
+  - migration shape for:
+    - nullable `source_file_id`
+    - `SET NULL` FK behavior
+    - PostgreSQL `JSONB` / `ARRAY` columns
+- added API integration coverage in
+  `backend/tests/integration/api/test_work_experience.py` for:
+  - create
+  - list
+  - update
+  - delete
+  - rejecting another user’s `source_file_id`
+
+Why implement it this way?
+
+Because the issue was about consistency, not expansion.
+
+The migration already represented the intended storage model:
+- `source_file_id` is optional
+- deleting a file should not delete the work experience
+- PostgreSQL-specific structured columns (`JSONB`, `ARRAY`) are part of the
+  persistence contract
+
+The missing piece was the HTTP/schema layer. Without `source_file_id` in the
+schemas, the API could not round-trip the model cleanly. Without ownership
+validation, the link could be abused across users. Without explicit null
+handling on PATCH, the field could not be cleared through the API even though
+the schema and FK design say that clearing it is valid.
+
+Important tradeoffs:
+
+This fix keeps ownership enforcement in the endpoint layer by reusing
+`FileService.get_for_user()` instead of adding a new profile sub-entity
+service. That is the smallest change that closes the security gap and keeps the
+ticket scoped. The tradeoff is that WorkExperience ownership logic is still
+distributed between:
+- profile ownership via `ProfileService.get_or_create()`
+- file ownership via `FileService.get_for_user()`
+
+That is acceptable here because the ticket was about contract hardening, not a
+broader service-layer refactor.
+
+Real issues encountered during implementation and testing:
+
+The shared `/home/vic/careercore` worktree was already on another issue branch
+with local changes, so the issue had to be moved immediately into a dedicated
+clean worktree from `origin/main` instead of trying to force the workflow
+through the shared tree.
+
+The focused unit test also failed on the first run because it imported the
+Alembic revision by module name. This repo’s migration tests load revisions by
+file path with `importlib.util.spec_from_file_location(...)`. The test was
+rewritten to use the existing pattern rather than broadening the ticket into a
+test-loader change.
+
+The API integration tests were added but not executed locally in this ticket.
+That is consistent with ADR-014 and the current repo state: broad app-level
+integration runs still depend on PostgreSQL-compatible bootstrap paths for
+models that use `JSONB` and `ARRAY`. The ticket did not widen into fixing that
+repo-wide test infrastructure.
+
+What future contributors should understand:
+
+If a profile sub-entity can reference another owned resource, the schema needs
+to expose that link and the API must validate ownership before persisting it.
+Do not rely on foreign keys alone for authorization.
+
+If a nullable field is meant to be clearable through PATCH, use
+`exclude_unset=True`, not `exclude_none=True`. Otherwise `null` stops meaning
+"clear this field" and becomes indistinguishable from "field omitted."
