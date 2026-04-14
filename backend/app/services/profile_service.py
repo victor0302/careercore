@@ -1,6 +1,7 @@
 """Profile service — create and manage the user's master career profile."""
 
 import uuid
+from typing import TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +13,14 @@ from app.models.project import Project
 from app.models.skill import Skill
 from app.models.work_experience import WorkExperience
 from app.schemas.profile import ProfileUpdate
+
+TProfileChild = TypeVar(
+    "TProfileChild",
+    WorkExperience,
+    Project,
+    Skill,
+    Certification,
+)
 
 
 class ProfileService:
@@ -106,3 +115,33 @@ class ProfileService:
     async def _has_related_rows(self, model: type, profile_id: uuid.UUID) -> bool:
         result = await self._db.execute(select(model.id).where(model.profile_id == profile_id).limit(1))
         return result.scalar_one_or_none() is not None
+
+    async def list_child_entities_for_user(
+        self,
+        model: type[TProfileChild],
+        user_id: uuid.UUID,
+    ) -> list[TProfileChild]:
+        profile = await self.get_or_create(user_id)
+        result = await self._db.execute(select(model).where(model.profile_id == profile.id))
+        return list(result.scalars().all())
+
+    async def get_child_entity_access(
+        self,
+        model: type[TProfileChild],
+        user_id: uuid.UUID,
+        entity_id: uuid.UUID,
+    ) -> tuple[TProfileChild | None, bool]:
+        """Return the owned entity plus whether the id exists for another user."""
+        profile = await self.get_or_create(user_id)
+        result = await self._db.execute(
+            select(model).where(
+                model.id == entity_id,
+                model.profile_id == profile.id,
+            )
+        )
+        entity = result.scalar_one_or_none()
+        if entity is not None:
+            return entity, False
+
+        exists_result = await self._db.execute(select(model.id).where(model.id == entity_id))
+        return None, exists_result.scalar_one_or_none() is not None

@@ -3,7 +3,6 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user
@@ -21,11 +20,11 @@ async def list_certifications(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[CertificationRead]:
-    profile = await ProfileService(db).get_or_create(current_user.id)
-    result = await db.execute(
-        select(Certification).where(Certification.profile_id == profile.id)
+    certifications = await ProfileService(db).list_child_entities_for_user(
+        Certification,
+        current_user.id,
     )
-    return [CertificationRead.model_validate(c) for c in result.scalars().all()]
+    return [CertificationRead.model_validate(c) for c in certifications]
 
 
 @router.post("", response_model=CertificationRead, status_code=status.HTTP_201_CREATED)
@@ -51,15 +50,16 @@ async def update_certification(
     db: AsyncSession = Depends(get_db),
 ) -> CertificationRead:
     profile_service = ProfileService(db)
-    profile = await profile_service.get_or_create(current_user.id)
-    result = await db.execute(
-        select(Certification).where(
-            Certification.id == cert_id, Certification.profile_id == profile.id
-        )
+    cert, exists_elsewhere = await profile_service.get_child_entity_access(
+        Certification,
+        current_user.id,
+        cert_id,
     )
-    cert = result.scalar_one_or_none()
     if cert is None:
+        if exists_elsewhere:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden.")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Certification not found.")
+    profile = await profile_service.get_or_create(current_user.id)
     for field, value in data.model_dump(exclude_none=True).items():
         setattr(cert, field, value)
     await db.flush()
@@ -74,15 +74,16 @@ async def delete_certification(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     profile_service = ProfileService(db)
-    profile = await profile_service.get_or_create(current_user.id)
-    result = await db.execute(
-        select(Certification).where(
-            Certification.id == cert_id, Certification.profile_id == profile.id
-        )
+    cert, exists_elsewhere = await profile_service.get_child_entity_access(
+        Certification,
+        current_user.id,
+        cert_id,
     )
-    cert = result.scalar_one_or_none()
     if cert is None:
+        if exists_elsewhere:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden.")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Certification not found.")
+    profile = await profile_service.get_or_create(current_user.id)
     await db.delete(cert)
     await db.flush()
     await profile_service.recalculate_completeness(profile)
