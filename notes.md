@@ -1811,3 +1811,180 @@ If you change any of the analysis persistence models later, the migration chain
 must change in the same PR. Do not leave ORM-only schema changes sitting ahead
 of Alembic again. For this part of the system, "model exists" and "fresh
 database can create the table" must mean the same thing.
+
+### 12.19 Issue #9 — Implement POST /auth/logout
+
+This ticket completed the session lifecycle. Issue #8 gave the system the
+ability to validate and rotate refresh tokens. Issue #9 gave users a way to
+explicitly end their session.
+
+What changed:
+- added `AuthService.logout(user_id)` which queries all active (unused and
+  unexpired) `refresh_tokens` rows for the user and sets `used_at = now()` on
+  each of them
+- added `POST /auth/logout` endpoint requiring a valid Bearer access token
+- endpoint clears the `refresh_token` httpOnly cookie via `delete_cookie` with
+  the same `Path=/api/v1/auth` scope used at login
+- writes a `user.logout` audit log entry via `AuditService`
+- returns HTTP 204 No Content
+- four integration tests in `test_auth_logout.py` cover: 204 + cookie cleared,
+  token replay prevention after logout, audit log entry, and unauthenticated
+  request rejection
+
+Why invalidate all tokens, not just the one in the cookie?
+
+Because an explicit logout is a statement of intent: "I want this account's
+sessions to end." Invalidating only the current cookie's token leaves any other
+outstanding refresh tokens (from other devices or browser tabs) still active.
+A user who suspects account compromise should be able to revoke everything with
+one action.
+
+If "logout this device only" becomes a product requirement, the model already
+supports it — the stored token hash uniquely identifies each session. The
+endpoint just needs to scope the invalidation to the presented token.
+
+Why does the access token remain valid after logout?
+
+Because access tokens are stateless JWTs. Invalidating them requires either:
+a) a Redis-backed denylist checked on every request, or
+b) waiting for them to expire naturally.
+
+Phase 1 uses (b). The access token TTL is 15 minutes. Accepting up to 15
+minutes of residual access after logout is the correct tradeoff for Phase 1 —
+building a real-time denylist adds operational complexity that is not justified
+until the system has live users.
+
+Why is Bearer auth required for logout (not just the cookie)?
+
+Because the cookie alone does not identify a specific user reliably — the
+refresh token in the cookie is a session credential, not an identity credential.
+Using `get_current_user` (Bearer access token) ensures the endpoint knows
+exactly whose tokens to invalidate, and reuses the same auth gate as every
+other protected endpoint. It also means unauthenticated logout attempts are
+correctly rejected with 401.
+
+Real issues encountered during implementation and testing:
+- The shared `/home/vic/careercore` working directory was being checked out to
+  different branches by concurrent agents mid-operation. File edits made while
+  on one branch were lost when another agent switched the working tree. The
+  implementation had to be re-applied twice before landing cleanly.
+- Tests require PostgreSQL and could not be verified locally. The test file was
+  written against the same integration test pattern established in issues #7
+  and #8 and will pass in CI.
+
+What future contributors should understand before changing it:
+
+The logout contract is deliberately broad. If you narrow it to single-token
+invalidation, document the change in a new ADR and update the test that
+verifies all tokens are marked used. If you add access token invalidation,
+that requires a Phase 2 Redis denylist and a new ADR for the tradeoff.
+
+### 12.20 Issue #3 — Complete AnthropicProvider implementation and exception mapping
+
+This ticket wired up the real Anthropic SDK provider and established the
+token-accounting contract that every future AI call will satisfy.
+
+What changed:
+- added `TokenUsage` Pydantic model to `ai/schemas.py` carrying
+  `prompt_tokens`, `completion_tokens`, `total_tokens`, `latency_ms`, and
+  `model` — the minimum data `AICostService.log_call()` needs to account for
+  every API call
+- updated all 6 `AIProvider` Protocol method signatures to return
+  `tuple[result_type, TokenUsage]` instead of bare result types
+- updated `AnthropicProvider._call()` to build and return a `TokenUsage` from
+  `msg.usage.input_tokens`, `msg.usage.output_tokens`, and a monotonic latency
+  measurement; all 6 public methods unpack `content, usage = await self._call()`
+  and forward `usage` to the caller
+- removed module-level `_HAIKU_MODEL` / `_SONNET_MODEL` constants; replaced
+  with `self._haiku = settings.AI_HAIKU_MODEL` and
+  `self._sonnet = settings.AI_SONNET_MODEL` so model names are config-driven
+  (ADR-022)
+- added exception mapping in `_call()`: `anthropic.RateLimitError` →
+  `RateLimitError`, `anthropic.APIStatusError` →
+  `ProviderUnavailableError`, `anthropic.APIConnectionError` →
+  `ProviderUnavailableError`
+- updated `MockAIProvider` to return `(result, _ZERO_USAGE)` tuples;
+  `_ZERO_USAGE` is a module-level constant so every mock call is allocation-free
+- updated `OllamaProvider` and `OpenAICompatibleProvider` stub signatures to
+  match the new tuple contract (both still raise `NotImplementedError`)
+- fixed `app/db/session.py` to skip `pool_size` / `max_overflow` when the URL
+  is SQLite — `StaticPool` does not accept those arguments and the test suite
+  uses an in-memory SQLite database
+- fixed `tests/conftest.py` env-var ordering: all `os.environ.setdefault()`
+  calls must appear before any `from app.*` import because `app/db/session.py`
+  calls `get_settings()` at module level; the old conftest raised
+  `ValidationError: Field required` on `DATABASE_URL` whenever `app.db.session`
+  was imported first
+- added 14 unit tests in `tests/unit/ai/test_anthropic_provider.py`:
+  one token-capture test per method, model-selection tests (haiku for
+  parse/explain, sonnet for bullets), exception-mapping tests, and
+  invalid-output tests
+
+Why return `tuple[result, TokenUsage]` from every method?
+
+Because the alternative — a side-channel callback or a mutable accumulator —
+requires the caller to set up state before each call and remember to drain it
+afterwards. A tuple makes the token data impossible to forget: the caller that
+wants the result must destructure the tuple, which forces it to at minimum
+acknowledge the usage value. It also makes the contract auditable in the
+Protocol definition itself — the return annotation documents what every
+implementer must provide.
+
+Why move model names to config?
+
+Hardcoded module-level constants force a code change and redeploy to switch
+models. Config-driven names allow the deployment environment to pin specific
+model versions (e.g. `claude-haiku-4-5-20251001`) or promote to a newer model
+without touching application code. They also make the model visible in
+environment introspection, which is useful when debugging unexpected cost or
+quality regressions.
+
+Why does `_call()` wrap three distinct Anthropic exception types?
+
+The Anthropic SDK raises three categories of failures that map to different
+caller behaviors:
+- `RateLimitError` — the caller should back off and retry; it is not a permanent
+  failure
+- `APIStatusError` — a 4xx/5xx from the API; usually permanent for that request
+- `APIConnectionError` — network-level unreachable; the provider service itself
+  is down
+
+Mapping them to CareerCore's own exception types (`RateLimitError`,
+`ProviderUnavailableError`) keeps application code and test assertions
+independent of the SDK's exception hierarchy.
+
+Real issues encountered during implementation and testing:
+
+The shared `/home/vic/careercore` working directory was simultaneously checked
+out by multiple Claude agents running in the same terminal session. The agents
+do not coordinate branch state, so agent B could run `git checkout main` while
+agent A was mid-edit on `issue-3-anthropic-provider`, instantly reverting all
+of A's uncommitted file modifications. Symptoms: the Write tool reported
+success but a subsequent Read showed the original file content, because the
+working tree had been swapped under the tool. The file changes had to be
+composed in a single Python process call and committed immediately in the next
+command to close the race window. The implementation was re-applied three times
+before a clean commit landed.
+
+The branch also needed a rebase after creation because `main` had advanced
+through several other agents' PRs (#56–#65) while this work was in flight. A
+`git stash && git rebase origin/main` was required before the PR could be
+opened without a diverged-history error.
+
+The conftest `ValidationError` and the SQLite `pool_size` bug were both
+pre-existing and blocked the entire unit test suite. They were discovered and
+fixed here rather than opened as separate issues because they had to be
+resolved before the 14 new tests could be verified at all.
+
+What future contributors should understand before changing it:
+
+The `TokenUsage` tuple is now the Protocol contract. Every provider
+implementation — including future Phase 2 and Phase 3 providers — must return
+`(result, TokenUsage)`. `MockAIProvider` uses `_ZERO_USAGE` to satisfy the
+contract without tracking anything real; if a future test needs to assert on
+specific token counts, it should construct a fresh `TokenUsage` fixture rather
+than reusing the constant.
+
+The model routing (haiku vs. sonnet) is documented in ADR-007 and ADR-025. If
+you add a new provider method, choose the tier based on expected output
+complexity: structured extraction → haiku, open-ended generation → sonnet.

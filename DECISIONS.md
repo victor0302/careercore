@@ -473,6 +473,7 @@ Issue #8 established DB-backed refresh token rotation and noted that "logout can
 - `POST /auth/logout` is the only `POST /auth/*` endpoint that requires authentication — it must stay out of the public exception list in the route protection audit.
 
 ---
+
 ## ADR-022 — Test bootstrap: env vars before app imports in conftest.py
 
 **Date:** 2026-04-14 (PR #63, issue #2)  
@@ -569,3 +570,29 @@ The ORM already defined `JobAnalysis`, `MatchedRequirement`, and `MissingRequire
 - `score_breakdown` remains structured and queryable as JSONB instead of becoming an opaque text blob.  
 - Match classification is enforced at the DB layer, so invalid `match_type` strings cannot be persisted by accident.  
 - Any future change to analysis persistence shape must update both the ORM and Alembic history in the same PR, not just one side.
+
+---
+
+## ADR-025 — AI provider methods return `tuple[result, TokenUsage]`; model names are config-driven
+
+**Date:** 2026-04-13 (issue #3)  
+**Status:** Accepted
+
+**Context:**  
+`AnthropicProvider._call()` already received token counts from the Anthropic SDK (`msg.usage.input_tokens`, `msg.usage.output_tokens`) but discarded them. `AICostService.log_call()` was designed to accept those values, but had no mechanism to receive them because the provider protocol returned bare result types. Separately, `AnthropicProvider` hardcoded model names (`claude-haiku-4-5-20251001`, `claude-sonnet-4-6`) as module-level constants, making model upgrades require a code change.
+
+**Decision:**  
+- All 6 `AIProvider` Protocol methods change their return type from `T` to `tuple[T, TokenUsage]`.  
+- `TokenUsage` is a new Pydantic model in `ai/schemas.py`: `prompt_tokens: int`, `completion_tokens: int`, `total_tokens: int`, `latency_ms: int`, `model: str`.  
+- `AnthropicProvider._call()` constructs a `TokenUsage` from `msg.usage` and a monotonic latency measurement and returns it alongside the content string.  
+- `MockAIProvider` returns `(result, _ZERO_USAGE)` where `_ZERO_USAGE` is a module-level `TokenUsage(prompt_tokens=0, ..., model="mock")` constant.  
+- Stub providers (`OllamaProvider`, `OpenAICompatibleProvider`) declare the tuple return type but continue to `raise NotImplementedError`.  
+- Model names move from module-level constants to `Settings.AI_HAIKU_MODEL` and `Settings.AI_SONNET_MODEL` with safe defaults; `AnthropicProvider.__init__` reads them via `settings`.
+
+**Consequences:**  
+- Every caller that destructures the tuple must acknowledge the usage value. It is no longer silently discarded.  
+- `AICostService.log_call()` can be wired up without any further protocol changes.  
+- Adding a new provider method requires returning `(result, TokenUsage)` — the Protocol contract enforces this at type-check time.  
+- Model names can be pinned per deployment environment via environment variables without touching application code.  
+- `MockAIProvider` satisfies the full contract and keeps all unit tests network-free; `_ZERO_USAGE` makes mock overhead negligible.  
+- The Protocol's tuple signatures are now the authoritative source for what every AI call must produce — change them only when `AICostService` or a new billing concern requires it.
