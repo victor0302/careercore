@@ -43,6 +43,9 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     uploaded_files: Mapped[list["UploadedFile"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "UploadedFile", back_populates="user", lazy="select"
     )
+    refresh_tokens: Mapped[list["RefreshToken"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
+        "RefreshToken", back_populates="user", lazy="select"
+    )
 
     def __repr__(self) -> str:
         return f"<User id={self.id} email={self.email!r} tier={self.tier}>"
@@ -53,4 +56,5 @@ from app.models.profile import Profile  # noqa: E402, F401
 from app.models.job_description import JobDescription  # noqa: E402, F401
 from app.models.resume import Resume  # noqa: E402, F401
 from app.models.ai_call_log import AICallLog  # noqa: E402, F401
+from app.models.refresh_token import RefreshToken  # noqa: E402, F401
 from app.models.uploaded_file import UploadedFile  # noqa: E402, F401

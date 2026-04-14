@@ -7,6 +7,7 @@ from app.models.job_analysis import JobAnalysis, MatchedRequirement, MatchType, 
 from app.models.job_description import JobDescription
 from app.models.profile import Profile
 from app.models.project import Project
+from app.models.refresh_token import RefreshToken
 from app.models.resume import EvidenceLink, Resume, ResumeBullet, ResumeVersion
 from app.models.skill import Skill
 from app.models.uploaded_file import FileStatus, UploadedFile
@@ -17,6 +18,7 @@ __all__ = [
     "User",
     "UserTier",
     "Profile",
+    "RefreshToken",
     "WorkExperience",
     "Project",
     "Skill",

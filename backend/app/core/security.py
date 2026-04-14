@@ -1,5 +1,6 @@
 """JWT creation / validation and bcrypt password hashing."""
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -26,6 +27,10 @@ def hash_password(plain: str) -> str:
 
 def verify_password(plain: str, hashed: str) -> bool:
     return _pwd_context.verify(plain, hashed)
+
+
+def hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 # ── JWT helpers ───────────────────────────────────────────────────────────────
