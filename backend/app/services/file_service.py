@@ -1,10 +1,10 @@
 """File service — upload, retrieve, and delete files via MinIO."""
 
-import io
 import uuid
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -71,8 +71,14 @@ class FileService:
         return record
 
     async def get_for_user(self, user_id: uuid.UUID, file_id: uuid.UUID) -> UploadedFile | None:
-        """Return an UploadedFile, enforcing ownership."""
-        return await self._db.get(UploadedFile, file_id)
+        """Return an UploadedFile only if it belongs to user_id."""
+        result = await self._db.execute(
+            select(UploadedFile).where(
+                UploadedFile.id == file_id,
+                UploadedFile.user_id == user_id,
+            )
+        )
+        return result.scalar_one_or_none()
 
     def get_presigned_url(self, storage_key: str, expires_in: int = 3600) -> str:
         """Generate a presigned GET URL for a file in MinIO.

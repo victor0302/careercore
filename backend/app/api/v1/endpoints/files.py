@@ -57,7 +57,7 @@ async def get_file_url(
     """Return a presigned download URL for a file. Enforces ownership."""
     service = FileService(db)
     record = await service.get_for_user(current_user.id, file_id)
-    if record is None or record.user_id != current_user.id:
+    if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found.")
     url = service.get_presigned_url(record.storage_key)
     return {"url": url}
