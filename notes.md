@@ -1154,3 +1154,66 @@ Why not cherry-pick?
 Cherry-pick would have created a duplicate commit object. Since `585459f` had
 the correct parent (`752a082` = current `main`), moving the branch pointer
 directly was cleaner — one commit, one branch, no duplicate history.
+
+### 12.12 Issue #16 — Profile completeness calculation
+
+This ticket replaced the placeholder completeness behavior with a real,
+deterministic Phase 1 score and made sure that stored value stays current after
+profile mutations.
+
+What changed:
+- `ProfileService.recalculate_completeness()` now computes a weighted score
+  instead of returning a placeholder `0.0`
+- the Phase 1 weights are `display_name` 10%, `current_title` 10%,
+  `target_domain` 10%, at least one work experience 25%, at least one skill
+  20%, at least one project 15%, and at least one certification 10%
+- whitespace-only root profile fields do not count as populated
+- `get_or_create()` persists `0.0` for an empty profile immediately instead of
+  leaving the field as an implicit placeholder
+- `update()` now recomputes and persists completeness after root profile edits
+- work experience, skill, project, and certification create/update/delete
+  endpoints now recompute completeness before the request transaction commits
+- focused unit tests were added for empty, full, mixed, and mutation-driven
+  completeness cases
+
+Why implement it in `ProfileService` instead of scattering logic across
+endpoints?
+
+Because the scoring rule is a business rule, not an HTTP concern. The service
+owns the formula and the persistence behavior. Endpoints only trigger the
+service after they mutate the profile graph. That keeps the scoring contract in
+one place and prevents drift where one endpoint updates the score and another
+forgets.
+
+Why a deterministic weighted score instead of AI or a more granular rubric?
+
+Because this value is supposed to be stable and explainable. Phase 1 only needs
+to answer "how much of the core profile graph exists?" not "how strong is the
+profile?" A simple weighted model gives the product a predictable percentage and
+avoids inventing quality judgments that are not backed by the current schema.
+
+Important tradeoff:
+
+The implementation checks section presence as a binary condition ("at least one
+row exists") rather than trying to grade the quality of each row. That means
+one project and five projects both satisfy the project portion equally. That is
+intentional for Phase 1. If future contributors want richer completeness, they
+must treat it as a scoring-contract change, not a small refactor.
+
+Real issues encountered during implementation and testing:
+- The accepted rule in ADR-014 says SQLite unit tests are fine for pure logic,
+  but `work_experiences` and `projects` use PostgreSQL-only `JSONB`/`ARRAY`
+  columns from issue `#12`. That made shared SQLite model setup unsuitable for
+  this ticket's test coverage.
+- The shared test environment in this shell also exposed unrelated packaging and
+  ORM setup problems before the new completeness assertions could even run.
+- The result was a deliberately narrow unit test around the deterministic helper
+  that verifies the formula itself without pretending SQLite can exercise the
+  PostgreSQL-backed profile graph.
+
+What future contributors should understand before changing it:
+
+`completeness_pct` is now a persisted contract, not a cosmetic placeholder. If
+you add a new profile section, change the weights, or move recalculation out of
+mutation paths, you are changing user-visible behavior and should update both
+the ADR and the tests in the same PR.
