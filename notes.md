@@ -2457,3 +2457,57 @@ Do not rely on foreign keys alone for authorization.
 If a nullable field is meant to be clearable through PATCH, use
 `exclude_unset=True`, not `exclude_none=True`. Otherwise `null` stops meaning
 "clear this field" and becomes indistinguishable from "field omitted."
+
+### 12.26 Issue #39 — AuditLog migration and append-only constraints
+
+This ticket wired the `AuditLog` ORM model (which already existed in code) to
+the Alembic migration history and documented its append-only intent.
+
+What changed:
+- added migration `20260414_0007` creating the `audit_logs` table
+- `user_id` is nullable with no FK constraint — system events have no user;
+  deleting a user account must not cascade-delete their audit history (ADR-012)
+- `created_at` has no `server_default` — `AuditService.log_event()` sets the
+  timestamp explicitly so it reflects application time, not DB receive time
+- composite index `ix_audit_logs_user_created` on `(user_id, created_at)` for
+  efficient per-user audit queries
+- migration docstring and inline comments document the append-only contract;
+  Phase 2 will add a PostgreSQL INSERT-only role and RLS policy (ADR-012)
+- 10 unit tests using `_FakeOp` pattern (no database needed): revision chain,
+  table creation, index shape, `user_id` nullability, FK absence, `action`
+  column type and length, `created_at` no server default, downgrade order
+
+Why nullable `user_id`?
+
+Some audit events are system-level — a scheduled job, a background task, or
+an infrastructure operation that has no associated authenticated user. Making
+`user_id` nullable means those events can still be recorded without a dummy
+user or a separate log sink. Per-user queries use the composite index; records
+with `user_id IS NULL` appear in full-table scans and ops-facing queries.
+
+Why no FK on `user_id`?
+
+The audit record is evidence. If the user is deleted, the audit history should
+survive. A FK with `ON DELETE CASCADE` would silently destroy that evidence.
+A FK with `ON DELETE SET NULL` would orphan the pointer but keep the row.
+Neither is what we want — we want the row to remain exactly as written. The
+answer is no FK at all, which is the same decision made for `ai_call_logs`.
+
+Why no `server_default` on `created_at`?
+
+The database `now()` function returns the transaction commit time, not the
+time the application decided to write the event. For audit logs that record
+when something happened, the application time is the authoritative value.
+If an audit row is written inside a long-running transaction, `now()` would
+record the commit time, not the event time. Setting `created_at` explicitly
+in `AuditService.log_event()` ensures the timestamp is always the moment the
+event was observed by application code.
+
+Why revision 0007 instead of 0006?
+
+The migration was originally drafted as `0006` before a `git pull` landed
+the uploaded-files migration (`0006_create_uploaded_files_table`) from a
+concurrently merged PR. The stale file was deleted and the revision renamed
+to `0007` with `down_revision = "20260414_0006"`. This is the correct recovery:
+never patch the revision ID of an already-merged migration; instead bump your
+own revision to sit above the new tail.
