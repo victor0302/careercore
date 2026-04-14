@@ -448,3 +448,79 @@ The file-download flow exposed three concrete risks: the signed URL endpoint nee
 - Short-lived presigned URLs reduce the usefulness of a leaked download link without changing the stored file metadata model.  
 - `storage_key` remains an internal storage concern; adding it to outward-facing schemas is now a contract change, not a casual endpoint edit.  
 - Future file endpoints should add response models first and only expose fields that the client actually needs.
+
+---
+
+## ADR-021 — Test bootstrap: env vars before app imports in conftest.py
+
+**Date:** 2026-04-14 (PR #63, issue #2)  
+**Status:** Accepted
+
+**Context:**  
+`app/db/session.py` creates a SQLAlchemy engine at module load time by calling
+`get_settings()` immediately. `Settings` validates all required environment
+variables on construction. The original `tests/conftest.py` set environment
+variables using `os.environ.setdefault` **after** the app module imports, causing
+`ValidationError` at test collection time before any test had a chance to run.
+
+**Decision:**  
+All `os.environ.setdefault` calls in `tests/conftest.py` must appear before any
+import of an `app.*` module. Imports that follow are annotated `# noqa: E402`
+to acknowledge the intentional import-after-statement pattern.
+
+Additionally, `app/db/session.py` must not pass `pool_size` or `max_overflow`
+to `create_async_engine` when `DATABASE_URL` is a SQLite URL. SQLite uses
+`StaticPool` which does not support connection-pool sizing arguments.
+
+**Consequences:**  
+- Unit tests can import `conftest.py` without a live database or real env vars.
+- SQLite in-memory (`sqlite+aiosqlite:///:memory:`) is a fully supported unit-test
+  URL with no configuration changes required.
+- Any new required `Settings` field must have a corresponding `setdefault` line
+  added to `conftest.py` in the same PR, or test collection will fail again.
+- A dialect check (`URL.startswith("sqlite")`) is now the canonical guard for
+  SQLite-incompatible engine kwargs. Do not add other PostgreSQL-specific args
+  without extending that guard.
+
+---
+
+## ADR-022 — Concurrent agent isolation via git worktrees
+
+**Date:** 2026-04-14 (PR #63, issue #2)  
+**Status:** Accepted
+
+**Context:**  
+Multiple AI agents and developers work on different issues in parallel on the
+same machine. Early sessions used `git checkout` inside the shared
+`/home/vic/careercore` working tree to switch branches between tasks. Because a
+worktree has exactly one HEAD, any `git checkout` there immediately changes the
+branch context for every process using that path — including other agents mid-
+implementation. This caused file edits to be stashed to the wrong branch, stash
+pops to introduce foreign changes, and repeated "wrong branch" surprises during
+`git status`.
+
+**Decision:**  
+Each concurrent unit of work (issue branch) gets its own git worktree:
+
+```bash
+git worktree add /home/vic/careercore-issue-{N} issue-{N}-{slug}
+```
+
+The naming convention is `/home/vic/careercore-issue-{N}` so worktrees are
+discoverable with `git worktree list` and unambiguously tied to an issue number.
+The shared main worktree at `/home/vic/careercore` is reserved for docs branches
+and short-lived operations that do not benefit from long-running isolation.
+
+All implementation work happens in the issue-specific worktree. `git push`
+operates from that worktree. No `git checkout` is run inside a worktree that
+another agent is actively using.
+
+**Consequences:**  
+- Each agent has a stable, isolated working tree; a branch switch by one agent
+  does not affect any other agent's state.
+- `git worktree list` provides a real-time map of all active work: which branches
+  are checked out where, and at which commits.
+- Stash-based branch hopping (`git stash / checkout / pop`) is no longer needed
+  and should not be used for issue isolation.
+- Worktrees left over after a PR merges should be removed with
+  `git worktree remove /path` to keep the list clean.
