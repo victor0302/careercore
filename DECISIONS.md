@@ -473,7 +473,6 @@ Issue #8 established DB-backed refresh token rotation and noted that "logout can
 - `POST /auth/logout` is the only `POST /auth/*` endpoint that requires authentication — it must stay out of the public exception list in the route protection audit.
 
 ---
-
 ## ADR-022 — Test bootstrap: env vars before app imports in conftest.py
 
 **Date:** 2026-04-14 (PR #63, issue #2)  
@@ -547,3 +546,26 @@ another agent is actively using.
   and should not be used for issue isolation.
 - Worktrees left over after a PR merges should be removed with
   `git worktree remove /path` to keep the list clean.
+
+---
+
+## ADR-024 — Job analysis persistence uses JSONB score breakdowns and DB-enforced match enums
+
+**Date:** 2026-04-14 (issue #22)  
+**Status:** Accepted
+
+**Context:**  
+The ORM already defined `JobAnalysis`, `MatchedRequirement`, and `MissingRequirement`, but the Alembic chain stopped before those tables existed. Issue `#22` had to make the migration history match the current persistence contract, including the database-level types that scoring and explanation layers expect to read later.
+
+**Decision:**  
+- `job_analyses` is persisted with FKs to both `job_descriptions.id` and `users.id`, each using `ON DELETE CASCADE`.  
+- `job_analyses.score_breakdown` uses PostgreSQL `JSONB`, matching the ORM model and preserving structured score output without flattening it into text columns.  
+- `matched_requirements.match_type` uses a PostgreSQL enum named `matchtype` with values `full`, `partial`, and `missing`.  
+- `matched_requirements` and `missing_requirements` each FK to `job_analyses.id` with `ON DELETE CASCADE`.  
+- The migration revision is `20260414_0004`, directly after `20260413_0003`.
+
+**Consequences:**  
+- A fresh database can now apply the migration chain and produce the same schema the scoring models already expect.  
+- `score_breakdown` remains structured and queryable as JSONB instead of becoming an opaque text blob.  
+- Match classification is enforced at the DB layer, so invalid `match_type` strings cannot be persisted by accident.  
+- Any future change to analysis persistence shape must update both the ORM and Alembic history in the same PR, not just one side.
