@@ -27,7 +27,6 @@ from app.ai.schemas import (
 _MOCK_REQ_1_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 _MOCK_REQ_2_ID = uuid.UUID("00000000-0000-0000-0000-000000000002")
 _MOCK_REQ_3_ID = uuid.UUID("00000000-0000-0000-0000-000000000003")
-
 _ZERO_USAGE = TokenUsage(
     prompt_tokens=0,
     completion_tokens=0,
@@ -39,6 +38,8 @@ _ZERO_USAGE = TokenUsage(
 
 class MockAIProvider:
     """Implements the AIProvider protocol with deterministic fixture data."""
+
+    parse_job_model = "mock"
 
     async def parse_job_description(self, raw_text: str) -> tuple[ParsedJD, TokenUsage]:
         """Return a fixed ParsedJD regardless of input text."""

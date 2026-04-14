@@ -80,6 +80,7 @@ async def test_mock_parse_job_description_returns_parsed_jd(
 ) -> None:
     result, usage = await mock_ai_provider.parse_job_description("Software Engineer at Acme")
     assert isinstance(result, ParsedJD)
+    assert isinstance(usage, TokenUsage)
     assert result.title
     assert isinstance(result.requirements, list)
     assert len(result.requirements) > 0
@@ -146,6 +147,7 @@ async def test_mock_explain_score_returns_score_explanation(
     )
     result, usage = await mock_ai_provider.explain_score(breakdown, job_title="Data Engineer")
     assert isinstance(result, ScoreExplanation)
+    assert isinstance(usage, TokenUsage)
     assert "Data Engineer" in result.headline
     assert "72" in result.headline
     assert isinstance(result.strengths, list)
@@ -164,6 +166,7 @@ async def test_mock_answer_followup_returns_follow_up_answer(
     )
     result, usage = await mock_ai_provider.answer_followup(question)
     assert isinstance(result, FollowUpAnswer)
+    assert isinstance(usage, TokenUsage)
     assert question.question in result.answer
     assert isinstance(result.sources, list)
     assert isinstance(usage, TokenUsage)
@@ -183,6 +186,7 @@ async def test_mock_generate_recommendations_returns_summary(
     )
     result, usage = await mock_ai_provider.generate_recommendations(context)
     assert isinstance(result, RecommendationSummary)
+    assert isinstance(usage, TokenUsage)
     assert len(result.recommendations) == len(missing)
     assert len(result.priority_order) == len(missing)
     assert isinstance(usage, TokenUsage)
@@ -202,6 +206,7 @@ async def test_mock_generate_learning_plan_returns_markdown_string(
     recommendations, _ = await mock_ai_provider.generate_recommendations(context)
     result, usage = await mock_ai_provider.generate_learning_plan(recommendations, timeline_weeks=8)
     assert isinstance(result, str)
+    assert isinstance(usage, TokenUsage)
     assert "8 weeks" in result
     assert "Docker" in result
     assert isinstance(usage, TokenUsage)

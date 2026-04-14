@@ -45,6 +45,7 @@ class AnthropicProvider:
         self._client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
         self._haiku = settings.AI_HAIKU_MODEL
         self._sonnet = settings.AI_SONNET_MODEL
+        self.parse_job_model = self._haiku
 
     # -- Internal helpers -------------------------------------------------------
 
