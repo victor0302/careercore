@@ -1423,3 +1423,94 @@ What future contributors should understand before changing it:
 you add a new profile section, change the weights, or move recalculation out of
 mutation paths, you are changing user-visible behavior and should update both
 the ADR and the tests in the same PR.
+
+### 12.15 Issue #42 — Secure error handling and request ID propagation
+
+This ticket turned the application's unhandled-exception behavior into an
+explicit environment-sensitive contract instead of leaving it as whatever the
+framework happened to return.
+
+What changed:
+- `backend/app/main.py` now installs HTTP middleware that reads
+  `X-Request-Id` from the incoming request when provided, otherwise generates a
+  UUID
+- the middleware stores that value on `request.state.request_id` and echoes it
+  back in the `X-Request-Id` response header
+- the global exception handler now always logs unhandled exceptions with the
+  request ID
+- production mode returns a generic JSON 500 payload:
+  `{"error": "Internal server error", "request_id": "..."}`
+- development mode still returns useful debugging detail:
+  the exception string, exception type, and request ID
+- integration coverage was added to assert both production and development
+  error shapes
+
+Why implement it this way?
+
+Because error handling has two competing goals that should not be solved with
+the same payload.
+
+In production, the API response is part of the external contract. It must be
+stable, predictable, and safe. Returning framework-generated tracebacks or raw
+exception messages would leak internal details such as file paths, implementation
+choices, or upstream failure strings. None of that helps the client recover.
+What the client actually needs is:
+- confirmation that the failure was server-side
+- a correlation handle they can report
+
+That is why the production payload was reduced to a generic message plus the
+request ID.
+
+In development, the opposite tradeoff applies. Hiding the exception text slows
+debugging and encourages developers to tail logs just to see what failed. The
+development response therefore preserves the exception message and type, but it
+still includes the same request ID so the debugging path is consistent across
+environments.
+
+Why use middleware for the request ID instead of generating it only inside the
+exception handler?
+
+Because the request ID is not only for failures. Once it is middleware-owned,
+every response can carry the same correlation identifier whether the request
+succeeds or fails, and every later subsystem can read it from the request
+state. That is the correct layering: correlation is a request concern, not an
+error-handler-only concern.
+
+Important tradeoff:
+
+The implementation deliberately trusts a caller-provided `X-Request-Id` when it
+exists. That is useful in development, testing, and distributed systems where
+an upstream proxy or client already has a correlation ID. The tradeoff is that
+the identifier is not guaranteed to be server-generated. If future production
+requirements demand stricter validation or a separate internal trace ID, that
+should be treated as an observability change, not a small refactor.
+
+Real issues encountered during implementation:
+
+The repository's main working tree was already carrying unrelated local edits
+for other tickets. Continuing on that branch would have mixed unrelated files
+into the `#42` PR and destroyed the one-issue/one-PR boundary. The fix was to
+recover the intended `#42` changes into a clean secondary worktree created from
+current `main`, then commit only the exception-handling files there. That
+recovery work is worth remembering because the branch hygiene was not optional;
+it was necessary to preserve a trustworthy review surface.
+
+Verification notes:
+
+The targeted syntax check passed for `backend/app/main.py` and the new
+integration test file. The full test suite was not run from this shell during
+the isolated recovery flow, so future contributors should not over-read that as
+full regression coverage for the entire app.
+
+What future contributors should understand before changing it:
+
+The important contract here is not just "there is an exception handler." The
+real contract is:
+- production responses must not leak internal exception detail
+- every unhandled error response must be correlatable through `request_id`
+- development mode must stay useful enough that engineers can debug without
+  re-implementing ad hoc logging in each endpoint
+
+If you change any of those behaviors, update the ADR and the integration tests
+in the same PR. This is now application behavior, not framework default
+scaffolding.

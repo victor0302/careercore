@@ -393,3 +393,27 @@ Whitespace-only string fields do not count as present. No AI call is involved.
 - The stored value can be returned directly to clients without recomputing the formula in frontend code.  
 - Any future Phase 2 profile section must explicitly decide whether it changes the completeness formula; adding a new table alone does not affect the score.  
 - Endpoints mutating profile sub-entities now own the responsibility to trigger a completeness recalculation before the request transaction commits.
+
+---
+
+## ADR-019 — Production 500 responses are generic and request-correlated
+
+**Date:** 2026-04-13 (PR #62, issue #42)  
+**Status:** Accepted
+
+**Context:**  
+Unhandled exceptions need two different behaviors: operations and support need enough information to correlate failures in logs, while production clients must not receive stack traces, file paths, or exception text that leaks internal state. The application also needed a consistent request identifier that could flow from the client into logs and back into the HTTP response.
+
+**Decision:**  
+- Every request passes through middleware that reads `X-Request-Id` from the incoming request if present, otherwise generates a UUID.  
+- The request ID is stored on `request.state.request_id` and echoed back in the `X-Request-Id` response header.  
+- The global exception handler always logs unhandled exceptions with the request ID.  
+- In production (`APP_ENV=production`), unhandled exceptions return:
+  `{"error": "Internal server error", "request_id": "<id>"}`  
+- In non-production environments, the same handler returns debug-oriented detail (`error`, exception `type`, and `request_id`) to preserve developer ergonomics.
+
+**Consequences:**  
+- Production clients get a stable error contract with no internal exception leakage.  
+- Operators can correlate a client-reported failure to a specific logged exception using the shared request ID.  
+- Tests can assert the production/development split without depending on stack-trace formatting.  
+- Future changes to exception handling must preserve the request ID propagation path or explicitly replace it with another correlation mechanism.
