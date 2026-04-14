@@ -447,6 +447,7 @@ The file-download flow exposed three concrete risks: the signed URL endpoint nee
 - Ownership enforcement for file downloads stays at the service boundary, matching ADR-013 instead of relying on endpoint-local handling.  
 - Short-lived presigned URLs reduce the usefulness of a leaked download link without changing the stored file metadata model.  
 - `storage_key` remains an internal storage concern; adding it to outward-facing schemas is now a contract change, not a casual endpoint edit.  
+- The outward `404 File not found.` contract intentionally collapses both missing IDs and foreign-owned IDs into the same response; tests should exercise both paths explicitly.  
 - Future file endpoints should add response models first and only expose fields that the client actually needs.
 
 ---

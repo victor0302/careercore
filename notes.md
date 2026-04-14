@@ -1523,6 +1523,9 @@ What changed:
   - short TTL enforcement
   - `404` behavior for missing IDs
   - response payloads that do not expose `storage_key`
+- follow-up coverage later made the cross-user path explicit as its own test
+  case, instead of leaving that behavior implied by the shared `None -> 404`
+  service contract
 
 Why move the ownership check into `FileService` instead of keeping it in the
 endpoint?
@@ -1559,6 +1562,10 @@ Real issues encountered during implementation and testing:
   another ticket's diff.
 - The implementation was therefore replayed in a clean worktree from
   `origin/main`, which was the correct isolation boundary.
+- A later pass on the ticket found that current `main` already contained the
+  endpoint and service hardening itself. The only legitimate remaining diff was
+  test clarity: spelling out the cross-user `404` behavior directly rather than
+  relying on broader "inaccessible file returns None" coverage.
 - The repository's shared backend test bootstrap still imports more application
   surface than these focused tests need, so verification ran with
   `pytest --noconftest` and explicit ephemeral dependencies rather than through
