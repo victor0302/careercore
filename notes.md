@@ -1442,8 +1442,8 @@ What changed:
 - added auth-audit tests covering:
   - missing-token `401` behavior on protected routes
   - expired-token `401` behavior
-  - the route-tree rule that every non-public endpoint declares
-    `get_current_user`
+  - the route-tree rule, enforced by source inspection, that every non-public
+    endpoint declares `get_current_user`
   - the development-vs-production docs route policy
 - documented the explicit public exception set in `README.md`
 
@@ -1487,8 +1487,8 @@ Real issues encountered during implementation and testing:
 - Because of that, the most reliable guardrail for the route audit was a static
   test over the endpoint source tree rather than a fully booted app import.
 - That is acceptable here because the rule being enforced is structural: which
-  endpoints declare `get_current_user`, and which routes are explicitly allowed
-  to remain public.
+  endpoints declare `get_current_user`, which routes are explicitly allowed to
+  remain public, and whether docs exposure is tied to environment as intended.
 
 What future contributors should understand before changing it:
 

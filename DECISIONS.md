@@ -407,6 +407,7 @@ The API already used `get_current_user` on most non-public endpoints, but the ru
 **Decision:**  
 - Every non-public API endpoint must declare `get_current_user` explicitly as a FastAPI dependency.  
 - Missing, invalid, and expired Bearer access tokens all return `401 Unauthorized` with `WWW-Authenticate: Bearer`.  
+- The route-protection audit is enforced with tests over the endpoint source tree, so the public exception set stays reviewable even while the shared app bootstrap remains noisy in local tests.  
 - The public API exceptions are:
   - `GET /health`
   - `POST /api/v1/auth/register`
@@ -421,4 +422,5 @@ The API already used `get_current_user` on most non-public endpoints, but the ru
 **Consequences:**  
 - Route protection can be audited mechanically: anything not in the public exception set must depend on `get_current_user`.  
 - Clients get the correct auth semantics for missing and expired access tokens; `403` is reserved for authorization failures after authentication.  
+- The auth boundary stays testable even when full app-import integration tests are temporarily constrained by import-time settings and database bootstrap coupling.  
 - Production deployments no longer expose the interactive API docs or OpenAPI schema unless that policy is changed deliberately.
