@@ -2206,3 +2206,82 @@ migration that calls `op.execute("ALTER TYPE aicalltype ADD VALUE '...'")`  —
 you cannot just update the existing migration, because the previous migration
 has already been applied to every existing database. The migration chain is
 immutable history, not editable source.
+
+### 12.23 Issue #17 — UploadedFile migration and extraction-state persistence
+
+This ticket was another migration-parity fix. The `UploadedFile` ORM model
+already existed and already defined the persistence contract for file metadata,
+status, and extracted text, but a fresh database still had no
+`uploaded_files` table because Alembic never created it.
+
+What changed:
+- added `backend/alembic/versions/20260414_0006_create_uploaded_files_table.py`
+- created `uploaded_files` with:
+  - UUID primary key using `gen_random_uuid()`
+  - `user_id` FK → `users.id ON DELETE CASCADE`
+  - `original_filename`
+  - `content_type`
+  - `size_bytes`
+  - unique `storage_key`
+  - PostgreSQL enum `filestatus`
+  - `status` server default `'pending'`
+  - `extracted_text`
+  - `error_message`
+  - `created_at` / `updated_at` matching the shared timestamp mixin
+- added `backend/tests/unit/test_uploaded_file_migration.py` covering:
+  - revision / `down_revision`
+  - table creation
+  - enum creation
+  - `user_id` index creation
+  - `storage_key` uniqueness
+  - downgrade cleanup for the table and enum
+
+Why implement it this way?
+
+Because this issue was about making the migration history match the current
+design, not about expanding the design. The prompt explicitly said to create an
+extraction companion table only "if retained in the design." It is not retained
+in the current ORM. Creating one here would have been inventing persistence
+behavior that the application does not actually use.
+
+The correct implementation was therefore the narrow one:
+- one `uploaded_files` table
+- one DB-enforced status enum
+- extraction output fields stored directly on the same row
+
+That keeps the migration aligned with the code that already exists, which is
+the main rule on schema backfill tickets.
+
+Important tradeoffs:
+
+Keeping extraction state on the file row makes the Phase 1 system simple.
+Ownership checks stay on a single record, the common read path is direct, and
+there is no separate 1:1 table to keep synchronized.
+
+The tradeoff is that this schema does not preserve retry-by-retry extraction
+history. If future requirements need per-attempt metadata or multiple extracted
+artifacts per file, that should be modeled explicitly in a later migration
+instead of overloading the current table.
+
+Real issues encountered during implementation:
+
+The shared `/home/vic/careercore` worktree was already on
+`issue-35-aicalllog-migration` with unrelated local changes in `notes.md` and
+an untracked review file. Running the requested checkout workflow there would
+have mixed issue `#17` into another branch. The work was moved into a clean
+dedicated worktree at `/home/vic/careercore-issue-17`.
+
+The migration test also needed one adjustment after the first run. The initial
+assertion inspected the fake-op table-level unique constraint object directly,
+but on unbound SQLAlchemy table elements that object did not expose the column
+the way the test expected. The fix was to assert the migration contract at the
+column level (`storage_key.unique`) instead of depending on SQLAlchemy’s
+internal unbound-constraint representation.
+
+What future contributors should understand:
+
+If `UploadedFile` changes, the model and migration chain need to change
+together. Do not add extraction-history concepts to Alembic without a matching
+ORM change, and do not add ORM fields without a migration. For Phase 1, the
+persistence rule is explicit: file metadata, processing state, and extracted
+text live on the same row.

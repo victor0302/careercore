@@ -616,3 +616,28 @@ The repository already contained migration `20260414_0004_create_job_analysis_ta
 - A fresh Alembic upgrade path now creates the job schema in dependency order instead of relying on out-of-band table creation.  
 - Database integrity rules for job requirements live in the migration layer as well as the ORM layer; invalid category values are rejected before application code sees them.  
 - When a migration is added out of order, the fix is to repair the revision chain explicitly rather than silently assuming existing databases already contain the missing tables.
+
+---
+
+## ADR-027 — Uploaded file extraction state is persisted in a single table
+
+**Date:** 2026-04-14 (issue #17)  
+**Status:** Accepted
+
+**Context:**  
+Phase 1 already had an `UploadedFile` ORM model with file metadata, processing status, and extraction output fields, but the Alembic history had no matching migration. The issue allowed an extraction companion table only if it still existed in the design. The current ORM does not define one.
+
+**Decision:**  
+- Persist uploaded file lifecycle state in a single `uploaded_files` table.  
+- Use a PostgreSQL enum `filestatus` with values `pending`, `processing`, `ready`, and `error` for `uploaded_files.status`.  
+- Store extraction output directly on the file row via `extracted_text` and `error_message`; do not create a separate extraction metadata table in Phase 1.  
+- Mirror the shared mixin contracts in the migration exactly:
+  - UUID PK with `gen_random_uuid()`
+  - `created_at` / `updated_at` as timezone-aware timestamps with `now()` server defaults
+  - `user_id` FK → `users.id ON DELETE CASCADE`
+  - unique `storage_key`
+
+**Consequences:**  
+- File metadata, processing state, and extraction output are retrieved through one ownership-scoped record instead of a file row plus a 1:1 companion table.  
+- Valid status values are enforced by the database rather than left to application-only conventions.  
+- If the product later needs extraction-attempt history or multiple extraction artifacts per file, that requires an explicit new schema; it should not be inferred from the current Phase 1 design.
