@@ -26,39 +26,40 @@ from app.ai.schemas import (
     RecommendationSummary,
     ScoreBreakdown,
     ScoreExplanation,
+    TokenUsage,
 )
 
 
-# ── Static protocol shape tests ───────────────────────────────────────────────
+# -- Static protocol shape tests ----------------------------------------------
 
 
 def test_ai_provider_protocol_method_signatures() -> None:
     hints = get_type_hints(AIProvider.parse_job_description)
     assert hints["raw_text"] is str
-    assert hints["return"] is ParsedJD
+    assert hints["return"] == tuple[ParsedJD, TokenUsage]
 
     hints = get_type_hints(AIProvider.generate_bullets)
     assert hints["contexts"] == list[BulletContext]
     assert hints["max_bullets"] is int
-    assert hints["return"] == list[GeneratedBullet]
+    assert hints["return"] == tuple[list[GeneratedBullet], TokenUsage]
 
     hints = get_type_hints(AIProvider.explain_score)
     assert hints["breakdown"] is ScoreBreakdown
     assert hints["job_title"] is str
-    assert hints["return"] is ScoreExplanation
+    assert hints["return"] == tuple[ScoreExplanation, TokenUsage]
 
     hints = get_type_hints(AIProvider.answer_followup)
     assert hints["question"] is FollowUpQuestion
-    assert hints["return"] is FollowUpAnswer
+    assert hints["return"] == tuple[FollowUpAnswer, TokenUsage]
 
     hints = get_type_hints(AIProvider.generate_recommendations)
     assert hints["context"] is GapContext
-    assert hints["return"] is RecommendationSummary
+    assert hints["return"] == tuple[RecommendationSummary, TokenUsage]
 
     hints = get_type_hints(AIProvider.generate_learning_plan)
     assert hints["recommendations"] is RecommendationSummary
     assert hints["timeline_weeks"] is int
-    assert hints["return"] is str
+    assert hints["return"] == tuple[str, TokenUsage]
 
 
 def test_current_providers_match_protocol_shape() -> None:
@@ -67,7 +68,7 @@ def test_current_providers_match_protocol_shape() -> None:
     assert isinstance(OllamaProvider(), AIProvider)
 
 
-# ── Runtime return-type tests for MockAIProvider ──────────────────────────────
+# -- Runtime return-type tests for MockAIProvider -----------------------------
 # These tests call every method and assert that the returned object is an
 # instance of the correct Pydantic model, which proves the mock satisfies the
 # full protocol contract without any network I/O.
@@ -77,13 +78,15 @@ def test_current_providers_match_protocol_shape() -> None:
 async def test_mock_parse_job_description_returns_parsed_jd(
     mock_ai_provider: MockAIProvider,
 ) -> None:
-    result = await mock_ai_provider.parse_job_description("Software Engineer at Acme")
+    result, usage = await mock_ai_provider.parse_job_description("Software Engineer at Acme")
     assert isinstance(result, ParsedJD)
     assert result.title
     assert isinstance(result.requirements, list)
     assert len(result.requirements) > 0
     for req in result.requirements:
         assert isinstance(req, JobRequirementItem)
+    assert isinstance(usage, TokenUsage)
+    assert usage.model == "mock"
 
 
 @pytest.mark.asyncio
@@ -100,13 +103,14 @@ async def test_mock_generate_bullets_returns_typed_list(
             is_required=True,
         ),
     )
-    result = await mock_ai_provider.generate_bullets([ctx], max_bullets=3)
-    assert isinstance(result, list)
-    assert len(result) == 1  # one context -> one bullet
-    bullet = result[0]
+    bullets, usage = await mock_ai_provider.generate_bullets([ctx], max_bullets=3)
+    assert isinstance(bullets, list)
+    assert len(bullets) == 1  # one context -> one bullet
+    bullet = bullets[0]
     assert isinstance(bullet, GeneratedBullet)
     assert 0.0 <= bullet.confidence <= 1.0
     assert bullet.evidence_entity_type == "work_experience"
+    assert isinstance(usage, TokenUsage)
 
 
 @pytest.mark.asyncio
@@ -126,8 +130,8 @@ async def test_mock_generate_bullets_respects_max_bullets(
         )
         for i in range(10)
     ]
-    result = await mock_ai_provider.generate_bullets(contexts, max_bullets=4)
-    assert len(result) <= 4
+    bullets, _usage = await mock_ai_provider.generate_bullets(contexts, max_bullets=4)
+    assert len(bullets) <= 4
 
 
 @pytest.mark.asyncio
@@ -140,13 +144,14 @@ async def test_mock_explain_score_returns_score_explanation(
         partial=[],
         missing=[],
     )
-    result = await mock_ai_provider.explain_score(breakdown, job_title="Data Engineer")
+    result, usage = await mock_ai_provider.explain_score(breakdown, job_title="Data Engineer")
     assert isinstance(result, ScoreExplanation)
     assert "Data Engineer" in result.headline
     assert "72" in result.headline
     assert isinstance(result.strengths, list)
     assert isinstance(result.gaps, list)
     assert result.recommendation
+    assert isinstance(usage, TokenUsage)
 
 
 @pytest.mark.asyncio
@@ -157,10 +162,11 @@ async def test_mock_answer_followup_returns_follow_up_answer(
         question="How can I improve my Python skills?",
         context_summary="User has 1 year of Python experience.",
     )
-    result = await mock_ai_provider.answer_followup(question)
+    result, usage = await mock_ai_provider.answer_followup(question)
     assert isinstance(result, FollowUpAnswer)
     assert question.question in result.answer
     assert isinstance(result.sources, list)
+    assert isinstance(usage, TokenUsage)
 
 
 @pytest.mark.asyncio
@@ -175,10 +181,11 @@ async def test_mock_generate_recommendations_returns_summary(
         missing_requirements=missing,
         user_summary="Junior backend developer with Python skills.",
     )
-    result = await mock_ai_provider.generate_recommendations(context)
+    result, usage = await mock_ai_provider.generate_recommendations(context)
     assert isinstance(result, RecommendationSummary)
     assert len(result.recommendations) == len(missing)
     assert len(result.priority_order) == len(missing)
+    assert isinstance(usage, TokenUsage)
 
 
 @pytest.mark.asyncio
@@ -192,11 +199,12 @@ async def test_mock_generate_learning_plan_returns_markdown_string(
         missing_requirements=missing,
         user_summary="Developer with Python background.",
     )
-    recommendations = await mock_ai_provider.generate_recommendations(context)
-    result = await mock_ai_provider.generate_learning_plan(recommendations, timeline_weeks=8)
+    recommendations, _ = await mock_ai_provider.generate_recommendations(context)
+    result, usage = await mock_ai_provider.generate_learning_plan(recommendations, timeline_weeks=8)
     assert isinstance(result, str)
     assert "8 weeks" in result
     assert "Docker" in result
+    assert isinstance(usage, TokenUsage)
 
 
 @pytest.mark.asyncio
@@ -216,5 +224,6 @@ async def test_mock_provider_makes_no_network_calls(
 
     monkeypatch.setattr(socket.socket, "connect", _no_connect)
 
-    result = await mock_ai_provider.parse_job_description("any text")
+    result, usage = await mock_ai_provider.parse_job_description("any text")
     assert isinstance(result, ParsedJD)
+    assert isinstance(usage, TokenUsage)
