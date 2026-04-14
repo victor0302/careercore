@@ -74,6 +74,7 @@ async def test_logout_writes_audit_log(client, mock_user, db) -> None:
     assert logs[0].user_id == mock_user.id
 
 
-async def test_logout_without_token_returns_403(client) -> None:
+async def test_logout_without_token_returns_401(client) -> None:
     response = await client.post("/api/v1/auth/logout")
-    assert response.status_code in (401, 403)
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Could not validate credentials"
