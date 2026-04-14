@@ -471,3 +471,79 @@ Issue #8 established DB-backed refresh token rotation and noted that "logout can
 - If a more granular "logout this device only" flow is needed later, the endpoint can be extended to accept a specific token identifier — the `used_at` model already supports it.  
 - The access token itself is not invalidated (it is short-lived and stateless). An attacker who holds a valid access token retains access until it expires (≤15 min). This is the accepted Phase 1 tradeoff; a Redis-backed access token denylist is a Phase 2 concern.  
 - `POST /auth/logout` is the only `POST /auth/*` endpoint that requires authentication — it must stay out of the public exception list in the route protection audit.
+
+---
+
+## ADR-022 — Test bootstrap: env vars before app imports in conftest.py
+
+**Date:** 2026-04-14 (PR #63, issue #2)  
+**Status:** Accepted
+
+**Context:**  
+`app/db/session.py` creates a SQLAlchemy engine at module load time by calling
+`get_settings()` immediately. `Settings` validates all required environment
+variables on construction. The original `tests/conftest.py` set environment
+variables using `os.environ.setdefault` **after** the app module imports, causing
+`ValidationError` at test collection time before any test had a chance to run.
+
+**Decision:**  
+All `os.environ.setdefault` calls in `tests/conftest.py` must appear before any
+import of an `app.*` module. Imports that follow are annotated `# noqa: E402`
+to acknowledge the intentional import-after-statement pattern.
+
+Additionally, `app/db/session.py` must not pass `pool_size` or `max_overflow`
+to `create_async_engine` when `DATABASE_URL` is a SQLite URL. SQLite uses
+`StaticPool` which does not support connection-pool sizing arguments.
+
+**Consequences:**  
+- Unit tests can import `conftest.py` without a live database or real env vars.
+- SQLite in-memory (`sqlite+aiosqlite:///:memory:`) is a fully supported unit-test
+  URL with no configuration changes required.
+- Any new required `Settings` field must have a corresponding `setdefault` line
+  added to `conftest.py` in the same PR, or test collection will fail again.
+- A dialect check (`URL.startswith("sqlite")`) is now the canonical guard for
+  SQLite-incompatible engine kwargs. Do not add other PostgreSQL-specific args
+  without extending that guard.
+
+---
+
+## ADR-023 — Concurrent agent isolation via git worktrees
+
+**Date:** 2026-04-14 (PR #63, issue #2)  
+**Status:** Accepted
+
+**Context:**  
+Multiple AI agents and developers work on different issues in parallel on the
+same machine. Early sessions used `git checkout` inside the shared
+`/home/vic/careercore` working tree to switch branches between tasks. Because a
+worktree has exactly one HEAD, any `git checkout` there immediately changes the
+branch context for every process using that path — including other agents mid-
+implementation. This caused file edits to be stashed to the wrong branch, stash
+pops to introduce foreign changes, and repeated "wrong branch" surprises during
+`git status`.
+
+**Decision:**  
+Each concurrent unit of work (issue branch) gets its own git worktree:
+
+```bash
+git worktree add /home/vic/careercore-issue-{N} issue-{N}-{slug}
+```
+
+The naming convention is `/home/vic/careercore-issue-{N}` so worktrees are
+discoverable with `git worktree list` and unambiguously tied to an issue number.
+The shared main worktree at `/home/vic/careercore` is reserved for docs branches
+and short-lived operations that do not benefit from long-running isolation.
+
+All implementation work happens in the issue-specific worktree. `git push`
+operates from that worktree. No `git checkout` is run inside a worktree that
+another agent is actively using.
+
+**Consequences:**  
+- Each agent has a stable, isolated working tree; a branch switch by one agent
+  does not affect any other agent's state.
+- `git worktree list` provides a real-time map of all active work: which branches
+  are checked out where, and at which commits.
+- Stash-based branch hopping (`git stash / checkout / pop`) is no longer needed
+  and should not be used for issue isolation.
+- Worktrees left over after a PR merges should be removed with
+  `git worktree remove /path` to keep the list clean.
