@@ -1273,3 +1273,90 @@ An architecture decision is only real
 when the code path, the stored data,
 and the tests all agree on the same rule.
 ```
+
+### 12.13 Issue #23 — Harden `POST /jobs` storage contract and ownership behavior
+
+This ticket was narrower than the issue title initially suggests.
+
+The existing jobs implementation on `main` already had the important ownership
+shape in place:
+- auth was already required on the jobs endpoints via `get_current_user`
+- `JobService.list_for_user()` already filtered by `user_id`
+- `JobService.get_for_user()` already used the correct double-filter
+  `(JobDescription.id == job_id, JobDescription.user_id == user_id)`
+- `create()` already flushed the new `JobDescription`, so generated IDs and
+  stored fields were available in the response
+
+What was not yet hardened was the input contract and the verification around
+that behavior.
+
+What changed:
+- `JobDescriptionCreate` now validates `title` and `raw_text` as non-blank
+  fields, not merely present fields
+- `title` and `raw_text` are trimmed before persistence so the stored value
+  matches the returned API value
+- `company` is trimmed and normalized to `None` when the client sends only
+  whitespace
+- Added integration coverage for:
+  - authenticated create returning a generated job ID and persisted normalized
+    fields
+  - unauthenticated create/list/detail requests being rejected
+  - authenticated list/detail only exposing the current user's jobs
+
+Why implement the contract in the Pydantic schema instead of the endpoint or
+service?
+
+Because this is request-shape normalization, not business logic.
+
+The endpoint should not contain ad hoc `.strip()` calls. The service should not
+have to defend itself against transport-layer whitespace quirks. The schema is
+the correct place to say:
+- these fields are required
+- blank strings are invalid
+- whitespace-only optional strings collapse to `None`
+
+That keeps the behavior consistent no matter which caller reaches the endpoint
+and makes the contract obvious in one place.
+
+Why was there no new ADR for this ticket?
+
+Because this issue did not add a new cross-cutting architectural rule.
+
+The important durable rules were already captured elsewhere:
+- ADR-013 already defines ownership enforcement through service-layer
+  double-filters
+- ADR-014 already defines the intended unit/integration test split
+
+Issue `#23` mostly turned those existing expectations into explicit coverage for
+the jobs endpoints and tightened one request schema.
+
+Important tradeoff:
+
+Whitespace normalization is intentionally conservative. The implementation trims
+the outer boundary of `title`, `company`, and `raw_text`, but it does not
+rewrite internal spacing or attempt content cleanup beyond that. That is the
+right scope for an HTTP input contract. More aggressive text cleanup would risk
+changing user-provided job descriptions in ways the API cannot easily justify.
+
+Real issues encountered during implementation and testing:
+
+1. The local repository had unrelated uncommitted changes, so they had to be
+   stashed before `git pull origin main` and branch creation could proceed
+   cleanly.
+2. The direct local pytest path for the new integration test was blocked by an
+   existing bootstrap problem: `app.db.session` creates the engine at import
+   time with Postgres-style pool arguments, which is not compatible with the
+   SQLite test URL used in `tests/conftest.py`.
+3. The containerized verification path was also blocked by existing repository
+   infrastructure: the backend Docker image currently fails during `pip install
+   -e ".[dev]"` because `setuptools.backends.legacy` is unavailable in the
+   build environment.
+
+Future contributors should understand the implication of those failures:
+
+The jobs tests added in this ticket are the correct test shape for the behavior,
+but the repository's current test/bootstrap layer still needs cleanup before
+they can serve as a reliable local verification path. Do not "fix" the jobs
+contract to work around those unrelated issues. Fix the shared test harness or
+Docker build separately, in a separate issue, and keep this ticket's scope
+focused on the jobs API contract itself.
