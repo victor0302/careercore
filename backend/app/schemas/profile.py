@@ -29,6 +29,7 @@ class ProfileUpdate(BaseModel):
 
 
 class WorkExperienceCreate(BaseModel):
+    source_file_id: uuid.UUID | None = None
     employer: str
     role_title: str
     start_date: date
@@ -42,6 +43,7 @@ class WorkExperienceRead(BaseModel):
 
     id: uuid.UUID
     profile_id: uuid.UUID
+    source_file_id: uuid.UUID | None
     employer: str
     role_title: str
     start_date: date
@@ -55,6 +57,7 @@ class WorkExperienceRead(BaseModel):
 
 
 class WorkExperienceUpdate(BaseModel):
+    source_file_id: uuid.UUID | None = None
     employer: str | None = None
     role_title: str | None = None
     start_date: date | None = None
