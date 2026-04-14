@@ -109,7 +109,6 @@ async def refresh(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
 
-
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
     request: Request,
@@ -130,6 +129,7 @@ async def logout(
         entity_type="User",
         entity_id=current_user.id,
     )
+
 
 @router.get("/me", response_model=UserRead)
 async def me(
