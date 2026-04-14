@@ -2699,3 +2699,75 @@ If you touch file upload behavior, preserve these boundaries:
 
 Do not move signed-download response work back into this path. Upload and
 download hardening are separate contracts in this codebase.
+
+### 12.29 Issue #41 — Input validation audit and malformed payload coverage
+
+This ticket was about closing a contract gap, not adding new business logic.
+
+FastAPI already gives this codebase a strong default: if a request body fails
+Pydantic validation, the framework returns `422` with a `{"detail": [...]}` body
+and the handler never runs. That only works if the schemas actually describe the
+contract. Before this issue, several write payloads were still too permissive:
+they accepted bare strings with no explicit empty-string or max-length
+constraints, which meant malformed input could reach deeper layers than it
+should have.
+
+What changed:
+- added malformed-payload integration coverage for:
+  - `POST /api/v1/auth/register`
+  - `POST /api/v1/auth/login`
+  - `POST /api/v1/jobs`
+  - `POST /api/v1/profile/experience`
+  - `POST /api/v1/profile/projects`
+  - `POST /api/v1/profile/skills`
+  - `POST /api/v1/profile/certifications`
+- tightened the request schemas instead of patching endpoint handlers:
+  - `UserLogin.password` now rejects empty strings
+  - profile sub-entity create/update schemas now declare explicit string bounds
+    for required names/titles and bounded optional text identifiers/URLs
+- added focused schema-level tests so the validation contract could be verified
+  without depending on the full app bootstrap
+
+Why implement it this way?
+
+Because ADR-004 is correct: the schema layer is the API contract.
+
+If the endpoint has to remember that:
+- a password cannot be empty
+- a project name cannot be missing
+- a certification name should be bounded to the same size as the persisted
+  column
+
+then the request contract is in the wrong place. The handler should receive a
+typed payload that is already valid, delegate to the service layer, and not
+re-implement transport validation with custom `if not payload.field` branches.
+
+Important tradeoff:
+
+This ticket did not broaden into response-shape work, service behavior changes,
+or database migrations. It only tightened the request contract where the issue
+required it. For jobs, the malformed-payload coverage follows the actual schema
+contract on main, which uses `raw_text` as the required body field rather than a
+separate `description` field name.
+
+Real implementation/testing issue:
+
+The focused schema tests ran cleanly and were the reliable verification path for
+this ticket. The new integration test module was added, but the repo's current
+app-level test bootstrap still builds full metadata against SQLite and fails
+earlier on existing PostgreSQL-only `JSONB` columns in unrelated models. That is
+the same boundary ADR-014 already documents. The correct response here was to
+keep the ticket scoped, land the schema fixes and coverage, and report the
+bootstrap limitation honestly instead of widening scope into test-infrastructure
+repair.
+
+What future contributors should understand:
+
+When a malformed request currently returns `500`, the first question should be:
+"does the Pydantic schema actually express the rule?" Most of the time the fix
+belongs there, not in the endpoint.
+
+If a model column has a meaningful max length or a field must not be blank,
+capture that in the request schema explicitly. Otherwise the API contract is
+underspecified and you will rediscover the same bug later through a different
+endpoint or a less readable database failure.

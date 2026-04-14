@@ -812,3 +812,36 @@ choices in that model needed to be locked in at the database layer:
   can answer "all logs for user X since date Y" with a single index scan.
   Reversing the order to `(created_at, user_id)` would make date-range scans
   across all users fast but per-user budget queries slow.
+
+---
+
+## ADR-033 — Malformed request validation is schema-enforced and fails before handlers run
+
+**Date:** 2026-04-14 (issue #41)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#41` audited malformed payload handling across auth, jobs, and profile
+sub-entity write endpoints. The problem was not business logic; it was contract
+drift. Some request schemas relied on bare `str` fields or omitted explicit
+length constraints, which meant malformed input could travel farther into the
+stack than intended. The issue explicitly required fixes in Pydantic schemas,
+not ad hoc endpoint guards.
+
+**Decision:**  
+- Request-shape validation for HTTP payloads lives in Pydantic schemas, not in
+  endpoint handlers.  
+- Required strings that must not be empty must declare that in the schema
+  (`Field(min_length=1, ...)` or an equivalent validator).  
+- Where the API contract depends on bounded string columns, the schema should
+  declare matching max lengths instead of accepting arbitrarily long input and
+  relying on database errors later.  
+- Malformed payloads should fail in FastAPI/Pydantic with the standard
+  `422 {"detail": [...]}` response before service-layer logic executes.
+
+**Consequences:**  
+- Endpoints receive typed, validated payloads instead of raw unchecked data.  
+- Validation failures are consistent across endpoint families and are testable
+  as transport-level contract behavior rather than business-logic side effects.  
+- Schema and persistence drift becomes more visible: if a column is meant to be
+  bounded or required, the API schema should say so explicitly.  

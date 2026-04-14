@@ -30,8 +30,8 @@ class ProfileUpdate(BaseModel):
 
 class WorkExperienceCreate(BaseModel):
     source_file_id: uuid.UUID | None = None
-    employer: str
-    role_title: str
+    employer: str = Field(min_length=1, max_length=255)
+    role_title: str = Field(min_length=1, max_length=255)
     start_date: date
     end_date: date | None = None
     is_current: bool = False
@@ -58,8 +58,8 @@ class WorkExperienceRead(BaseModel):
 
 class WorkExperienceUpdate(BaseModel):
     source_file_id: uuid.UUID | None = None
-    employer: str | None = None
-    role_title: str | None = None
+    employer: str | None = Field(default=None, min_length=1, max_length=255)
+    role_title: str | None = Field(default=None, min_length=1, max_length=255)
     start_date: date | None = None
     end_date: date | None = None
     is_current: bool | None = None
@@ -70,9 +70,9 @@ class WorkExperienceUpdate(BaseModel):
 
 
 class ProjectCreate(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=255)
     description_raw: str | None = None
-    url: str | None = None
+    url: str | None = Field(default=None, max_length=512)
 
 
 class ProjectRead(BaseModel):
@@ -90,18 +90,18 @@ class ProjectRead(BaseModel):
 
 
 class ProjectUpdate(BaseModel):
-    name: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=255)
     description_raw: str | None = None
-    url: str | None = None
+    url: str | None = Field(default=None, max_length=512)
 
 
 # ── Skill ─────────────────────────────────────────────────────────────────────
 
 
 class SkillCreate(BaseModel):
-    name: str
-    category: str | None = None
-    proficiency_level: str | None = None
+    name: str = Field(min_length=1, max_length=255)
+    category: str | None = Field(default=None, max_length=100)
+    proficiency_level: str | None = Field(default=None, max_length=50)
     years_of_experience: float | None = None
 
 
@@ -117,9 +117,9 @@ class SkillRead(BaseModel):
 
 
 class SkillUpdate(BaseModel):
-    name: str | None = None
-    category: str | None = None
-    proficiency_level: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    category: str | None = Field(default=None, max_length=100)
+    proficiency_level: str | None = Field(default=None, max_length=50)
     years_of_experience: float | None = None
 
 
@@ -127,12 +127,12 @@ class SkillUpdate(BaseModel):
 
 
 class CertificationCreate(BaseModel):
-    name: str
-    issuer: str | None = None
+    name: str = Field(min_length=1, max_length=255)
+    issuer: str | None = Field(default=None, max_length=255)
     issued_date: date | None = None
     expiry_date: date | None = None
-    credential_id: str | None = None
-    credential_url: str | None = None
+    credential_id: str | None = Field(default=None, max_length=255)
+    credential_url: str | None = Field(default=None, max_length=512)
 
 
 class CertificationRead(BaseModel):
@@ -149,9 +149,9 @@ class CertificationRead(BaseModel):
 
 
 class CertificationUpdate(BaseModel):
-    name: str | None = None
-    issuer: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    issuer: str | None = Field(default=None, max_length=255)
     issued_date: date | None = None
     expiry_date: date | None = None
-    credential_id: str | None = None
-    credential_url: str | None = None
+    credential_id: str | None = Field(default=None, max_length=255)
+    credential_url: str | None = Field(default=None, max_length=512)
