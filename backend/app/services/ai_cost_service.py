@@ -22,16 +22,8 @@ from app.models.user import User, UserTier
 
 settings = get_settings()
 
-# Cost per 1M tokens in USD (update as pricing changes)
-_COST_PER_M_TOKENS: dict[str, float] = {
-    "claude-haiku-4-5-20251001": 0.25,
-    "claude-sonnet-4-6": 3.00,
-    "default": 1.00,
-}
-
-
 def _cost_usd(model: str, total_tokens: int) -> float:
-    rate = _COST_PER_M_TOKENS.get(model, _COST_PER_M_TOKENS["default"])
+    rate = settings.ai_model_pricing.get(model, settings.ai_model_pricing["default"])
     return (total_tokens / 1_000_000) * rate
 
 
