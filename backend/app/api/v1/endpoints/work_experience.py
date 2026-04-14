@@ -34,10 +34,12 @@ async def create_experience(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WorkExperienceRead:
-    profile = await ProfileService(db).get_or_create(current_user.id)
+    profile_service = ProfileService(db)
+    profile = await profile_service.get_or_create(current_user.id)
     exp = WorkExperience(profile_id=profile.id, **data.model_dump())
     db.add(exp)
     await db.flush()
+    await profile_service.recalculate_completeness(profile)
     return WorkExperienceRead.model_validate(exp)
 
 
@@ -48,7 +50,8 @@ async def update_experience(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> WorkExperienceRead:
-    profile = await ProfileService(db).get_or_create(current_user.id)
+    profile_service = ProfileService(db)
+    profile = await profile_service.get_or_create(current_user.id)
     result = await db.execute(
         select(WorkExperience).where(
             WorkExperience.id == experience_id,
@@ -61,6 +64,7 @@ async def update_experience(
     for field, value in data.model_dump(exclude_none=True).items():
         setattr(exp, field, value)
     await db.flush()
+    await profile_service.recalculate_completeness(profile)
     return WorkExperienceRead.model_validate(exp)
 
 
@@ -70,7 +74,8 @@ async def delete_experience(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    profile = await ProfileService(db).get_or_create(current_user.id)
+    profile_service = ProfileService(db)
+    profile = await profile_service.get_or_create(current_user.id)
     result = await db.execute(
         select(WorkExperience).where(
             WorkExperience.id == experience_id,
@@ -81,3 +86,5 @@ async def delete_experience(
     if exp is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Experience not found.")
     await db.delete(exp)
+    await db.flush()
+    await profile_service.recalculate_completeness(profile)

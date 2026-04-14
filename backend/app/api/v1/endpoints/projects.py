@@ -32,10 +32,12 @@ async def create_project(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ProjectRead:
-    profile = await ProfileService(db).get_or_create(current_user.id)
+    profile_service = ProfileService(db)
+    profile = await profile_service.get_or_create(current_user.id)
     proj = Project(profile_id=profile.id, **data.model_dump())
     db.add(proj)
     await db.flush()
+    await profile_service.recalculate_completeness(profile)
     return ProjectRead.model_validate(proj)
 
 
@@ -46,7 +48,8 @@ async def update_project(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ProjectRead:
-    profile = await ProfileService(db).get_or_create(current_user.id)
+    profile_service = ProfileService(db)
+    profile = await profile_service.get_or_create(current_user.id)
     result = await db.execute(
         select(Project).where(Project.id == project_id, Project.profile_id == profile.id)
     )
@@ -56,6 +59,7 @@ async def update_project(
     for field, value in data.model_dump(exclude_none=True).items():
         setattr(proj, field, value)
     await db.flush()
+    await profile_service.recalculate_completeness(profile)
     return ProjectRead.model_validate(proj)
 
 
@@ -65,7 +69,8 @@ async def delete_project(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    profile = await ProfileService(db).get_or_create(current_user.id)
+    profile_service = ProfileService(db)
+    profile = await profile_service.get_or_create(current_user.id)
     result = await db.execute(
         select(Project).where(Project.id == project_id, Project.profile_id == profile.id)
     )
@@ -73,3 +78,5 @@ async def delete_project(
     if proj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
     await db.delete(proj)
+    await db.flush()
+    await profile_service.recalculate_completeness(profile)
