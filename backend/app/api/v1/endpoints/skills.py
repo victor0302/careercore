@@ -32,10 +32,12 @@ async def create_skill(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SkillRead:
-    profile = await ProfileService(db).get_or_create(current_user.id)
+    profile_service = ProfileService(db)
+    profile = await profile_service.get_or_create(current_user.id)
     skill = Skill(profile_id=profile.id, **data.model_dump())
     db.add(skill)
     await db.flush()
+    await profile_service.recalculate_completeness(profile)
     return SkillRead.model_validate(skill)
 
 
@@ -46,7 +48,8 @@ async def update_skill(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SkillRead:
-    profile = await ProfileService(db).get_or_create(current_user.id)
+    profile_service = ProfileService(db)
+    profile = await profile_service.get_or_create(current_user.id)
     result = await db.execute(
         select(Skill).where(Skill.id == skill_id, Skill.profile_id == profile.id)
     )
@@ -56,6 +59,7 @@ async def update_skill(
     for field, value in data.model_dump(exclude_none=True).items():
         setattr(skill, field, value)
     await db.flush()
+    await profile_service.recalculate_completeness(profile)
     return SkillRead.model_validate(skill)
 
 
@@ -65,7 +69,8 @@ async def delete_skill(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    profile = await ProfileService(db).get_or_create(current_user.id)
+    profile_service = ProfileService(db)
+    profile = await profile_service.get_or_create(current_user.id)
     result = await db.execute(
         select(Skill).where(Skill.id == skill_id, Skill.profile_id == profile.id)
     )
@@ -73,3 +78,5 @@ async def delete_skill(
     if skill is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found.")
     await db.delete(skill)
+    await db.flush()
+    await profile_service.recalculate_completeness(profile)
