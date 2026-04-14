@@ -687,6 +687,36 @@ Phase 1 already had an `UploadedFile` ORM model with file metadata, processing s
 
 ---
 
+## ADR-030 — Profile sub-entity ownership distinguishes foreign IDs from missing IDs
+
+**Date:** 2026-04-14 (issue #15)  
+**Status:** Accepted
+
+**Context:**  
+Profile sub-entity endpoints (`WorkExperience`, `Project`, `Skill`, `Certification`) already filtered by the authenticated user's profile, but the implementation treated both cases below as the same `404` outcome:
+
+1. the requested ID does not exist at all
+2. the requested ID exists but belongs to another user
+
+That hid authorization failures as missing-resource failures and kept the ownership rule embedded in endpoint-local queries instead of a reusable service boundary.
+
+**Decision:**  
+- `ProfileService` owns sub-entity access checks through helper methods that:
+  - list child entities for the authenticated user only
+  - return `(entity, exists_elsewhere)` for targeted lookups
+- Profile sub-entity endpoints map ownership outcomes as:
+  - owned entity → allow
+  - foreign existing entity → `403 Forbidden`
+  - nonexistent entity → `404 Not Found`
+- The same rule applies to `WorkExperience.source_file_id`: another user's uploaded file ID is an authorization failure (`403`), not a missing-file response.
+
+**Consequences:**  
+- Ownership semantics are explicit: clients can distinguish "that record does not exist" from "you are not allowed to touch that record."  
+- ADR-013 remains the governing rule: ownership logic lives at the service boundary, not as ad hoc endpoint-only filtering.  
+- Future profile sub-entity endpoints should reuse the same access pattern instead of re-implementing ownership checks inline.
+
+---
+
 ## ADR-030 — Audit log `created_at` is application-set, not server-defaulted
 
 **Date:** 2026-04-14 (PR #76, issue #39)  

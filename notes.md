@@ -2511,3 +2511,96 @@ concurrently merged PR. The stale file was deleted and the revision renamed
 to `0007` with `down_revision = "20260414_0006"`. This is the correct recovery:
 never patch the revision ID of an already-merged migration; instead bump your
 own revision to sit above the new tail.
+
+### 12.27 Issue #15 — Profile and sub-entity CRUD ownership enforcement
+
+This ticket finished the ownership side of the Phase 1 profile API slice.
+
+Before `#15`, the profile sub-entity endpoints were already filtering by the
+authenticated user's profile ID, which prevented straightforward cross-user
+reads and mutations. The problem was subtler: the ownership rule lived inside
+endpoint-local queries, and the API could not distinguish between these two
+cases:
+- the target row does not exist
+- the target row exists, but belongs to another user
+
+That matters because those are different failures. The first is a missing
+resource. The second is an authorization failure.
+
+What changed:
+- added service-layer helpers in `ProfileService` for:
+  - listing child entities for the authenticated user only
+  - checking targeted child-entity access and distinguishing:
+    - owned
+    - foreign-but-existing
+    - missing
+- updated `WorkExperience`, `Project`, `Skill`, and `Certification` endpoints
+  to use the service-layer ownership boundary instead of embedding all access
+  logic inline
+- cross-user PATCH and DELETE attempts against existing profile sub-entities
+  now return `403 Forbidden`
+- truly missing sub-entity IDs still return `404 Not Found`
+- list endpoints continue to return only the authenticated user's rows
+- `WorkExperience.source_file_id` ownership validation now also distinguishes:
+  - another user's file UUID → `403`
+  - nonexistent file UUID → `404`
+- added focused profile ownership tests and service-level tests for the new
+  access boundary
+
+Why not keep returning `404` for everything?
+
+Because collapsing "forbidden" into "not found" makes the contract less clear
+and hides authorization failures as if they were lookup failures.
+
+There are cases where a product deliberately chooses "always 404" to minimize
+resource enumeration. That is a valid strategy, but it has to be a deliberate
+policy. This issue’s prompt explicitly called for `403` when the existing issue
+contract expects authorization failure, so the API should say what actually
+happened.
+
+Why move this into `ProfileService` instead of just patching each endpoint?
+
+Because ADR-013 is correct: ownership belongs at the service boundary.
+
+If every endpoint re-implements:
+- profile lookup
+- child row lookup
+- foreign-row detection
+- error mapping assumptions
+
+then the codebase slowly accumulates slightly different ownership semantics
+across each entity type. That is how security drift happens.
+
+By putting the access pattern in `ProfileService`, the endpoints get simpler:
+- ask the service for access
+- map owned / forbidden / missing to HTTP
+
+That is the right layering.
+
+Important tradeoff:
+
+This issue does **not** introduce the all-entity ownership suite. That remains
+separate work. The goal here was to make the profile slice itself correct and
+testable without expanding into every other resource family in the repo.
+
+Real implementation/testing note:
+
+Focused service-level tests for the new ownership helpers ran cleanly. The
+shared app-level integration harness in this environment remained noisy and did
+not produce reliable local completion for the new profile ownership test module,
+so verification stayed intentionally narrow around the service boundary and
+syntax correctness of the changed endpoints/tests. That is not ideal, but it is
+an honest statement of what was verified locally.
+
+What future contributors should understand:
+
+When a request targets a profile child row by ID, there are three states:
+- it is yours
+- it exists but is not yours
+- it does not exist
+
+Those states should not be conflated by accident.
+
+If a future endpoint or service touches `WorkExperience`, `Project`, `Skill`,
+or `Certification`, reuse the `ProfileService` ownership boundary instead of
+re-inventing entity-specific access logic in the endpoint.
