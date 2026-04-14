@@ -663,3 +663,24 @@ Phase 1 already had an `UploadedFile` ORM model with file metadata, processing s
 - File metadata, processing state, and extraction output are retrieved through one ownership-scoped record instead of a file row plus a 1:1 companion table.  
 - Valid status values are enforced by the database rather than left to application-only conventions.  
 - If the product later needs extraction-attempt history or multiple extraction artifacts per file, that requires an explicit new schema; it should not be inferred from the current Phase 1 design.
+
+---
+
+## ADR-029 — WorkExperience file links are nullable, owner-scoped, and API-clearable
+
+**Date:** 2026-04-14 (issue #13)  
+**Status:** Accepted
+
+**Context:**  
+`WorkExperience` already had an ORM-level `source_file_id` field with `ForeignKey("uploaded_files.id", ondelete="SET NULL")`, but the Pydantic schemas and API contract did not expose that field consistently. That meant the migration and ORM implied a file-link capability the API could not safely create, return, or clear. It also left room for a user to attach another user's uploaded file by UUID unless the endpoint layer enforced ownership explicitly.
+
+**Decision:**  
+- `WorkExperience.source_file_id` remains nullable and continues to reference `uploaded_files.id` with `ON DELETE SET NULL`.  
+- Work-experience create/read/update schemas expose `source_file_id` directly.  
+- Create and update flows must validate that any non-null `source_file_id` belongs to the authenticated user before persisting it.  
+- PATCH handling must treat `source_file_id = null` as an explicit clear operation rather than silently dropping it from the update payload.
+
+**Consequences:**  
+- The API, ORM, and migration now describe the same WorkExperience persistence contract.  
+- File-derived work experiences can be linked safely without creating an IDOR path through cross-user file UUIDs.  
+- Deleting an uploaded file severs the reference without deleting the work-experience record, and the API can also clear that link intentionally.
