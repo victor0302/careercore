@@ -4,9 +4,11 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.provider import AIProvider
+from app.models.job_analysis import JobAnalysis
 from app.models.job_description import JobDescription
 from app.schemas.job import JobDescriptionCreate
 
@@ -36,6 +38,14 @@ class JobService:
         """Return all job descriptions for a user, ordered newest first."""
         result = await self._db.execute(
             select(JobDescription)
+            .options(
+                selectinload(JobDescription.analyses),
+                with_loader_criteria(
+                    JobAnalysis,
+                    JobAnalysis.user_id == user_id,
+                    include_aliases=True,
+                ),
+            )
             .where(JobDescription.user_id == user_id)
             .order_by(JobDescription.created_at.desc())
         )
@@ -44,12 +54,34 @@ class JobService:
     async def get_for_user(self, user_id: uuid.UUID, job_id: uuid.UUID) -> JobDescription | None:
         """Return a single JD, enforcing ownership."""
         result = await self._db.execute(
-            select(JobDescription).where(
+            select(JobDescription)
+            .options(
+                selectinload(JobDescription.analyses).selectinload(
+                    JobAnalysis.matched_requirements
+                ),
+                selectinload(JobDescription.analyses).selectinload(
+                    JobAnalysis.missing_requirements
+                ),
+                with_loader_criteria(
+                    JobAnalysis,
+                    JobAnalysis.user_id == user_id,
+                    include_aliases=True,
+                ),
+            )
+            .where(
                 JobDescription.id == job_id,
                 JobDescription.user_id == user_id,
             )
         )
         return result.scalar_one_or_none()
+
+    @staticmethod
+    def get_latest_analysis(job: JobDescription, user_id: uuid.UUID) -> JobAnalysis | None:
+        """Return the user's most recent analysis for a job."""
+        analyses = [analysis for analysis in job.analyses if analysis.user_id == user_id]
+        if not analyses:
+            return None
+        return max(analyses, key=lambda analysis: analysis.analyzed_at)
 
     async def parse(self, user_id: uuid.UUID, job_id: uuid.UUID) -> JobDescription:
         """Trigger AI parsing of a job description.
