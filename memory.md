@@ -19,6 +19,46 @@ commits land on the wrong branch or after unrelated changes leak into the diff.
 
 ## 2. Issue Memory
 
+### Issue #17 — UploadedFile migration
+
+What was done:
+- read `DECISIONS.md` before starting, including the SQLite/PostgreSQL split in
+  ADR-014
+- checked the issue with `gh issue view 17`
+- created and used a clean issue worktree at `/home/vic/careercore-issue-17`
+- added migration `20260414_0006_create_uploaded_files_table.py`
+- added unit test `backend/tests/unit/test_uploaded_file_migration.py`
+- pushed branch `issue-17-uploaded-file-migration`
+- opened PR `#74`
+
+What mattered:
+- the ORM already defined the real design:
+  - one `uploaded_files` table
+  - one DB-enforced `filestatus` enum
+  - extraction output stored directly on the file row
+- no extraction companion table should be invented unless the ORM actually
+  adopts one
+- the migration had to replicate the shared UUID and timestamp mixins exactly,
+  not approximately
+
+Operational problems encountered:
+- the shared `/home/vic/careercore` worktree was already on
+  `issue-35-aicalllog-migration` with unrelated changes, so the normal
+  checkout workflow was not safe there
+- fetch/push operations hit the sandbox SSH config permission problem again,
+  so the git network steps had to run outside the sandbox
+- the first uniqueness assertion in the fake-op migration test was brittle
+  because SQLAlchemy’s unbound table elements did not expose the inline unique
+  constraint the way a bound table would
+
+What to remember next time:
+- migration backfill tickets should mirror the ORM that already exists; do not
+  invent extra schema just because the prompt leaves room for it
+- for fake-op Alembic tests, assert the contract at the column or op-call level
+  if SQLAlchemy’s unbound constraint objects are incomplete
+- if the shared worktree is already dirty or on another issue branch, move the
+  ticket into a dedicated clean worktree immediately
+
 ### Issue #22 — Job analysis and requirement-match migrations
 
 What was done:
