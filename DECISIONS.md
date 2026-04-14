@@ -448,3 +448,26 @@ The file-download flow exposed three concrete risks: the signed URL endpoint nee
 - Short-lived presigned URLs reduce the usefulness of a leaked download link without changing the stored file metadata model.  
 - `storage_key` remains an internal storage concern; adding it to outward-facing schemas is now a contract change, not a casual endpoint edit.  
 - Future file endpoints should add response models first and only expose fields that the client actually needs.
+
+---
+
+## ADR-021 — Logout invalidates all active refresh tokens for the user
+
+**Date:** 2026-04-14 (issue #9)  
+**Status:** Accepted
+
+**Context:**  
+Issue #8 established DB-backed refresh token rotation and noted that "logout can be implemented by setting `used_at` on all of a user's active tokens." Before this ticket, no logout endpoint existed — a user had no way to explicitly end their session or revoke all outstanding refresh tokens.
+
+**Decision:**  
+- `POST /auth/logout` requires a valid Bearer access token (via `get_current_user`).  
+- `AuthService.logout(user_id)` marks every active (unused, unexpired) refresh token for that user by setting `used_at = now()`.  
+- The response is HTTP 204 No Content with a `Set-Cookie: refresh_token=; Max-Age=0; Path=/api/v1/auth` header that clears the client's httpOnly cookie.  
+- A `user.logout` event is written to `audit_logs` via `AuditService`.  
+- "All active tokens" (not just the one in the current cookie) are invalidated — a logout is a full session revocation, not a single-token discard.
+
+**Consequences:**  
+- A user who logs out from one device immediately invalidates all other outstanding refresh tokens. This is the correct behavior for an explicit logout action.  
+- If a more granular "logout this device only" flow is needed later, the endpoint can be extended to accept a specific token identifier — the `used_at` model already supports it.  
+- The access token itself is not invalidated (it is short-lived and stateless). An attacker who holds a valid access token retains access until it expires (≤15 min). This is the accepted Phase 1 tradeoff; a Redis-backed access token denylist is a Phase 2 concern.  
+- `POST /auth/logout` is the only `POST /auth/*` endpoint that requires authentication — it must stay out of the public exception list in the route protection audit.
