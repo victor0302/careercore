@@ -80,13 +80,18 @@ class FileService:
         )
         return result.scalar_one_or_none()
 
-    def get_presigned_url(self, storage_key: str, expires_in: int = 3600) -> str:
-        """Generate a presigned GET URL for a file in MinIO.
+    async def get_download_url_for_user(self, user_id: uuid.UUID, file_id: uuid.UUID) -> str | None:
+        """Return a short-lived presigned download URL only for the file owner."""
+        record = await self.get_for_user(user_id, file_id)
+        if record is None:
+            return None
+        return self.get_presigned_url(record.storage_key)
 
-        TODO: Add user ownership validation before generating URLs in the endpoint layer.
-        """
+    def get_presigned_url(self, storage_key: str, expires_in: int | None = None) -> str:
+        """Generate a presigned GET URL for a file in MinIO."""
+        ttl = expires_in or settings.FILE_DOWNLOAD_URL_TTL_SECONDS
         return self._s3.generate_presigned_url(  # type: ignore[no-any-return]
             "get_object",
             Params={"Bucket": settings.MINIO_BUCKET, "Key": storage_key},
-            ExpiresIn=expires_in,
+            ExpiresIn=ttl,
         )

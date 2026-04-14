@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     MINIO_ACCESS_KEY: str
     MINIO_SECRET_KEY: str
     MINIO_BUCKET: str = "careercore-uploads"
+    FILE_DOWNLOAD_URL_TTL_SECONDS: int = 300
 
     # Celery
     CELERY_BROKER_URL: str
