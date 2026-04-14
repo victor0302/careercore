@@ -1697,7 +1697,7 @@ git worktree add /home/vic/careercore-issue-2 issue-2-harden-mockai
 
 All subsequent work happened in `/home/vic/careercore-issue-2`, which is
 completely isolated from the main worktree and from all other issue worktrees.
-This is now the documented convention (see ADR-022).
+This is now the documented convention (see ADR-023).
 
 **pytest not installed in the `.venv`**
 
