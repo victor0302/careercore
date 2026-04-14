@@ -329,3 +329,33 @@ No issue is worked on by more than one branch at a time. No branch covers more t
 
 **Consequences:**  
 Clean git history — every merge commit traces to an issue. Prevents two agents from implementing the same thing in parallel. Enforces that work is always associated with a tracked requirement.
+
+---
+
+## ADR-016 — Scoring evidence is entity-backed and deterministic
+
+**Date:** 2026-04-13 (PR #58, issue #25)  
+**Status:** Accepted
+
+**Context:**  
+ADR-008 established that job-fit scoring must be deterministic and must not call an LLM. Issue `#25` forced the next concrete design question: what exactly counts as a full match, what counts as a partial match, and how evidence should be persisted so later layers can explain the score without re-deriving it.
+
+**Decision:**  
+- `ScoringService` normalizes requirement text and profile text with case-folding and punctuation stripping before matching.  
+- Matching is category-specific:
+  - `skill` → `Profile.skills[].name`
+  - `tool` → `work_experiences.tool_tags` and `projects.tool_tags`
+  - `experience` → `work_experiences.skill_tags` and `description_raw`
+  - `project` → `projects.skill_tags`, `description_raw`, and `bullets`
+  - `education` → `certifications.name` and `issuer`
+- Match classification:
+  - **full** = exact normalized match, or corroborated by 2+ distinct profile entities
+  - **partial** = non-exact substring/token overlap from 1 profile entity
+  - **missing** = no deterministic match found
+- Every non-missing match writes `MatchedRequirement` rows with `source_entity_type`, `source_entity_id`, and confidence. Missing requirements write `MissingRequirement` rows.
+- `ScoreBreakdown.evidence_map` stores the same linkage at the output layer, keyed by requirement ID.
+
+**Consequences:**  
+- Scores are reproducible and traceable back to concrete profile rows.  
+- Resume generation and score explanation can cite stored evidence instead of asking an LLM to rediscover it.  
+- The heuristic stays simple and auditable, but it will under-match some semantic equivalents until richer requirement storage or synonym handling is added in a later phase.

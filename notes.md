@@ -1154,3 +1154,122 @@ Why not cherry-pick?
 Cherry-pick would have created a duplicate commit object. Since `585459f` had
 the correct parent (`752a082` = current `main`), moving the branch pointer
 directly was cleaner — one commit, one branch, no duplicate history.
+
+### 12.12 Issue #25 — Deterministic scoring service and evidence mapping
+
+This ticket turned ADR-008 from an architectural statement into executable
+behavior.
+
+Before `#25`, `scoring_service.py` was a skeleton. The weights were documented,
+the intent was documented, but the implementation still returned a zero score
+and persisted no useful evidence. That is an important distinction: a design is
+not real until the code path exists and the behavior is testable.
+
+What changed:
+- Implemented deterministic requirement extraction inside `ScoringService` from
+  structured JSON already present on the job payload
+- Implemented category-specific matching across profile entities:
+  - `skill` requirements match `Profile.skills[].name`
+  - `tool` requirements match `WorkExperience.tool_tags` and `Project.tool_tags`
+  - `experience` requirements match `WorkExperience.skill_tags` and
+    `description_raw`
+  - `project` requirements match `Project.skill_tags`, `description_raw`, and
+    `bullets`
+  - `education` requirements match `Certification.name` and `issuer`
+- Added normalization and deterministic heuristics:
+  - exact normalized match → `full`
+  - substring/token overlap from one entity → `partial`
+  - no match → `missing`
+  - corroboration from multiple entities upgrades the match to `full`
+- Persisted `MatchedRequirement` rows for non-missing matches, including
+  `source_entity_type`, `source_entity_id`, and confidence
+- Persisted `MissingRequirement` rows when no evidence exists
+- Populated `ScoreBreakdown.evidence_map` so the outward-facing score payload
+  points back to the same concrete profile entities as the database rows
+- Added unit coverage for full, partial, and missing behavior plus stored
+  evidence linkage to the correct entity ID
+
+Why keep scoring deterministic instead of "smarter" with an LLM?
+
+Because score generation is infrastructure, not presentation.
+
+If an LLM decides the score, then:
+- the result is not reproducible
+- the reviewer cannot audit why the score changed
+- the test suite can only weakly assert behavior
+- the system pays token cost every time it needs a number
+
+If deterministic code decides the score, then:
+- identical inputs always produce identical outputs
+- regressions are visible in ordinary unit tests
+- evidence can be stored structurally, not inferred after the fact
+- the LLM can be reserved for explanation instead of judgment
+
+That split is the right architecture. The formula decides. The model explains.
+
+Why store evidence in both `MatchedRequirement` rows and `ScoreBreakdown`?
+
+Because they solve different problems.
+
+The relational rows are for persistence, auditability, and later joins. They
+answer questions like:
+- Which profile entity satisfied this requirement?
+- Was the match full or partial?
+- What was the stored confidence at analysis time?
+
+The `evidence_map` is for transport and immediate application use. It lets the
+API or the next service layer read the score result without needing another
+query to reconstruct the same links.
+
+Duplicating the linkage across the database row and the returned breakdown is
+intentional here. One serves storage. One serves consumption.
+
+Why are the matching heuristics intentionally simple?
+
+Because this phase needs explainability more than recall.
+
+A heuristic like:
+- lowercase
+- strip punctuation
+- compare exact strings
+- fall back to substring/token overlap
+
+is not semantically perfect, but it is debuggable. When a requirement fails to
+match, a developer can inspect the input and understand why. That is much more
+valuable at this stage than chasing "smarter" fuzzy matching that nobody can
+reason about during code review.
+
+This also sets the correct bar for future iteration: if synonym expansion or a
+more sophisticated rules engine is added later, it should be introduced as a
+deliberate change to a known baseline, not as hidden complexity in the first
+version.
+
+Real issues encountered during implementation:
+
+1. The repository state in `/home/vic/careercore` was dirty, and `git pull
+   origin main` could not fast-forward because local edits to `DECISIONS.md`
+   and `notes.md` would have been overwritten.
+2. The clean implementation work therefore happened in a separate worktree
+   based on `origin/main`, which was the correct move. Preserving unrelated
+   local work is more important than forcing the workflow through a dirty tree.
+3. The shared backend test bootstrap on `main` still has environment coupling:
+   `app.db.session` reads settings at import time, and its engine configuration
+   is not SQLite-safe for unit tests. That means the app-level `conftest.py`
+   path is not yet a clean unit-test harness for pure business logic.
+4. Because of that coupling, the scoring tests for `#25` were kept as focused
+   unit tests around the service behavior itself. That is not a compromise in
+   rigor; it is the correct test boundary for deterministic logic while the
+   broader bootstrap remains unstable.
+
+That last point matters. Senior engineering is not "use the heaviest possible
+test every time." It is choosing the narrowest test boundary that proves the
+behavior you own, while being explicit about the unrelated infrastructure that
+still needs cleanup.
+
+The main lesson from `#25` is this:
+
+```
+An architecture decision is only real
+when the code path, the stored data,
+and the tests all agree on the same rule.
+```
