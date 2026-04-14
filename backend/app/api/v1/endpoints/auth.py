@@ -1,13 +1,14 @@
-"""Authentication endpoints — register, login, refresh."""
+"""Authentication endpoints — register, login, refresh, me."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.dependencies import get_current_user
 from app.db.session import get_db
+from app.models.user import User
 from app.schemas.user import (
     AccessTokenResponse,
-    RefreshRequest,
     UserCreate,
     UserLogin,
     UserRead,
@@ -89,12 +90,12 @@ async def login(
 @router.post("/refresh", response_model=AccessTokenResponse)
 async def refresh(
     request: Request,
-    body: RefreshRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> AccessTokenResponse:
     """Exchange a refresh token for a new access token."""
     service = AuthService(db)
-    refresh_token = body.refresh_token or request.cookies.get("refresh_token")
+    refresh_token = request.cookies.get("refresh_token")
     if not refresh_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -102,6 +103,15 @@ async def refresh(
         )
     try:
         tokens = await service.refresh(refresh_token)
+        _set_refresh_cookie(response, tokens.refresh_token)
         return AccessTokenResponse(access_token=tokens.access_token)
     except AuthError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+
+@router.get("/me", response_model=UserRead)
+async def me(
+    current_user: User = Depends(get_current_user),
+) -> UserRead:
+    """Return the currently authenticated user."""
+    return UserRead.model_validate(current_user)
