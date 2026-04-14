@@ -4,10 +4,11 @@ All values are read from environment variables (or .env file).
 Access the singleton with: from app.core.config import get_settings; settings = get_settings()
 """
 
+import json
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,6 +42,14 @@ class Settings(BaseSettings):
     # Model names — override to pin a version or test a different model tier
     AI_HAIKU_MODEL: str = "claude-haiku-4-5-20251001"
     AI_SONNET_MODEL: str = "claude-sonnet-4-6"
+    ai_model_pricing: dict[str, float] = Field(
+        default_factory=lambda: {
+            "claude-haiku-4-5-20251001": 0.25,
+            "claude-sonnet-4-6": 3.00,
+            "default": 1.00,
+        },
+        validation_alias="AI_MODEL_PRICING_JSON",
+    )
 
     # JWT
     JWT_SECRET_KEY: str
@@ -58,6 +67,26 @@ class Settings(BaseSettings):
     @classmethod
     def parse_cors_origins(cls, v: str) -> str:
         return v
+
+    @field_validator("ai_model_pricing", mode="before")
+    @classmethod
+    def parse_ai_model_pricing(cls, value: object) -> dict[str, float]:
+        if isinstance(value, dict):
+            pricing = value
+        elif isinstance(value, str):
+            pricing = json.loads(value)
+        else:
+            raise TypeError("AI model pricing must be a JSON object string or dict.")
+
+        if not isinstance(pricing, dict):
+            raise TypeError("AI model pricing must decode to an object.")
+
+        normalized: dict[str, float] = {}
+        for key, rate in pricing.items():
+            if not isinstance(key, str):
+                raise TypeError("AI model pricing keys must be strings.")
+            normalized[key] = float(rate)
+        return normalized
 
     @property
     def cors_origins_list(self) -> list[str]:
