@@ -12,6 +12,7 @@ from app.ai.schemas import (
     RecommendationSummary,
     ScoreBreakdown,
     ScoreExplanation,
+    TokenUsage,
 )
 
 
@@ -19,111 +20,39 @@ from app.ai.schemas import (
 class AIProvider(Protocol):
     """Defines the contract every AI backend must satisfy.
 
-    Implementations: MockProvider (tests), AnthropicProvider (production),
-    OpenAICompatibleProvider (Phase 2), OllamaProvider (Phase 3).
-
-    All methods are async. Callers must check the daily token budget
-    (via AICostService) before invoking any method and log the result afterward.
+    All methods return (result, TokenUsage). Callers must:
+      1. Call AICostService.check_budget() before invoking any method.
+      2. Call AICostService.log_call() with the returned TokenUsage afterward.
     """
 
-    async def parse_job_description(self, raw_text: str) -> ParsedJD:
-        """Parse a raw job description string into structured requirements.
-
-        Args:
-            raw_text: The full text of the job posting.
-
-        Returns:
-            ParsedJD with title, company, and a list of JobRequirementItems.
-
-        Raises:
-            InvalidOutputError: If the model returns unparseable output.
-            ProviderUnavailableError: If the upstream API is unreachable.
-            RateLimitError: If the upstream API rate-limits the request.
-        """
+    async def parse_job_description(self, raw_text: str) -> tuple[ParsedJD, TokenUsage]:
+        """Parse a raw job description string into structured requirements."""
         ...
 
     async def generate_bullets(
         self, contexts: list[BulletContext], max_bullets: int = 5
-    ) -> list[GeneratedBullet]:
-        """Generate evidence-backed resume bullets for a set of job requirements.
-
-        Each context ties one profile entity (work experience or project) to one
-        job requirement. The model should produce at most max_bullets bullets
-        total, ranked by confidence.
-
-        Args:
-            contexts: List of BulletContext objects — one per requirement.
-            max_bullets: Maximum number of bullets to return.
-
-        Returns:
-            List of GeneratedBullet ordered by confidence descending.
-
-        Raises:
-            InvalidOutputError, ProviderUnavailableError, RateLimitError.
-        """
+    ) -> tuple[list[GeneratedBullet], TokenUsage]:
+        """Generate evidence-backed resume bullets for a set of job requirements."""
         ...
 
     async def explain_score(
         self, breakdown: ScoreBreakdown, job_title: str
-    ) -> ScoreExplanation:
-        """Generate a natural-language explanation of a fit score.
-
-        Uses the score breakdown (matched, partial, missing requirements) to
-        produce a concise explanation suitable for displaying to the user.
-
-        Args:
-            breakdown: The ScoreBreakdown produced by ScoringService.
-            job_title: The job title being targeted.
-
-        Returns:
-            ScoreExplanation with headline, strengths, gaps, and recommendation.
-
-        Raises:
-            InvalidOutputError, ProviderUnavailableError, RateLimitError.
-        """
+    ) -> tuple[ScoreExplanation, TokenUsage]:
+        """Generate a natural-language explanation of a fit score."""
         ...
 
-    async def answer_followup(self, question: FollowUpQuestion) -> FollowUpAnswer:
-        """Answer a user's follow-up question about their career analysis.
-
-        Args:
-            question: FollowUpQuestion containing the question text and relevant context.
-
-        Returns:
-            FollowUpAnswer with a natural-language response and cited sources.
-
-        Raises:
-            InvalidOutputError, ProviderUnavailableError, RateLimitError.
-        """
+    async def answer_followup(self, question: FollowUpQuestion) -> tuple[FollowUpAnswer, TokenUsage]:
+        """Answer a user's follow-up question about their career analysis."""
         ...
 
-    async def generate_recommendations(self, context: GapContext) -> RecommendationSummary:
-        """Generate actionable recommendations to close identified skill gaps.
-
-        Args:
-            context: GapContext with missing requirements and user profile summary.
-
-        Returns:
-            RecommendationSummary with a prioritized list of actionable steps.
-
-        Raises:
-            InvalidOutputError, ProviderUnavailableError, RateLimitError.
-        """
+    async def generate_recommendations(
+        self, context: GapContext
+    ) -> tuple[RecommendationSummary, TokenUsage]:
+        """Generate actionable recommendations to close identified skill gaps."""
         ...
 
     async def generate_learning_plan(
         self, recommendations: RecommendationSummary, timeline_weeks: int = 12
-    ) -> str:
-        """Generate a week-by-week learning plan based on recommendations.
-
-        Args:
-            recommendations: RecommendationSummary from generate_recommendations().
-            timeline_weeks: Total number of weeks in the plan.
-
-        Returns:
-            A Markdown-formatted learning plan string.
-
-        Raises:
-            InvalidOutputError, ProviderUnavailableError, RateLimitError.
-        """
+    ) -> tuple[str, TokenUsage]:
+        """Generate a week-by-week learning plan based on recommendations."""
         ...
