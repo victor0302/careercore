@@ -616,3 +616,25 @@ The repository already contained migration `20260414_0004_create_job_analysis_ta
 - A fresh Alembic upgrade path now creates the job schema in dependency order instead of relying on out-of-band table creation.  
 - Database integrity rules for job requirements live in the migration layer as well as the ORM layer; invalid category values are rejected before application code sees them.  
 - When a migration is added out of order, the fix is to repair the revision chain explicitly rather than silently assuming existing databases already contain the missing tables.
+
+---
+
+## ADR-027 — AI model pricing is deployment config; budget errors carry reset metadata
+
+**Date:** 2026-04-14 (issue #36)  
+**Status:** Accepted
+
+**Context:**  
+`AICostService` already enforced per-tier daily token budgets, but the USD pricing table was hardcoded in service code. That meant a provider pricing change required a code change and deploy instead of an environment-level override. Separately, `BudgetExceededError` exposed only `user_id`, `budget`, and `used`, which made it impossible for later HTTP layers to include an accurate reset time without re-deriving the budget window independently.
+
+**Decision:**  
+- AI model pricing is sourced from `Settings.ai_model_pricing`, populated from the JSON-encoded `AI_MODEL_PRICING_JSON` environment variable.  
+- `_cost_usd()` reads rates from that parsed config and falls back to the `"default"` entry for unknown model names.  
+- `BudgetExceededError` now computes and exposes `reset_at`, defined as the next UTC midnight after the exception is raised.  
+- Tier selection remains unchanged: free users use `FREE_TIER_DAILY_TOKEN_BUDGET`, standard users use `STANDARD_DAILY_TOKEN_BUDGET`.
+
+**Consequences:**  
+- Pricing can be changed per deployment without touching application code.  
+- Unknown or newly introduced model names still produce a cost estimate through the `"default"` rate instead of failing cost logging.  
+- Later API layers can use `BudgetExceededError.reset_at` directly for response payloads or `Retry-After` headers without duplicating budget-window logic.  
+- The cost service remains the single place where budget enforcement and cost estimation rules are combined; future pricing changes should update config, not reintroduce service-local constants.

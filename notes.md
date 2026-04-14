@@ -2206,3 +2206,86 @@ migration that calls `op.execute("ALTER TYPE aicalltype ADD VALUE '...'")`  —
 you cannot just update the existing migration, because the previous migration
 has already been applied to every existing database. The migration chain is
 immutable history, not editable source.
+
+### 12.23 Issue #36 — Make AI cost pricing config-driven and complete budget payloads
+
+This ticket finished the parts of the AI cost model that were still behaving
+like scaffolding instead of a real service contract.
+
+What changed:
+- removed the hardcoded model-pricing dict from `ai_cost_service.py`
+- added config-backed pricing in `Settings` through `AI_MODEL_PRICING_JSON`
+- parsed that JSON into `settings.ai_model_pricing` during settings validation
+- updated `_cost_usd()` to read rates from config and fall back to the
+  `"default"` model rate
+- added `reset_at` to `BudgetExceededError`, computed as the next UTC midnight
+- added focused unit coverage for:
+  - under-budget pass-through
+  - at-budget failure
+  - over-budget failure
+  - free-tier budget selection
+  - standard-tier budget selection
+  - config-driven pricing lookup
+  - unknown-model fallback pricing
+  - future `reset_at` behavior
+
+Why implement pricing through `Settings` instead of leaving the dict in the
+service?
+
+Because pricing data is operational configuration, not business logic.
+
+The service should know how to apply a rate table. It should not be the source
+of truth for the rate table itself. Hardcoding prices in the service turns a
+provider pricing update into a code-edit event, which is the wrong change
+boundary. The deployment environment is the correct place to say "these are the
+rates this environment uses right now." Parsing the JSON into a typed dict in
+`Settings` keeps the cost service simple while still validating the input once
+at process startup.
+
+Why put `reset_at` on the exception instead of computing it in the endpoint?
+
+Because the reset time is part of the budget-domain event, not part of HTTP.
+
+If every caller has to independently derive "next UTC midnight," then the
+application is one refactor away from inconsistent retry windows across
+endpoints, jobs, and future CLI flows. The service already owns the budget
+window. The exception should carry the exact metadata that explains that
+failure. That keeps later HTTP code thin and avoids duplicating time-window
+logic outside the budget layer.
+
+Important tradeoff:
+
+The pricing map is intentionally permissive at the service boundary. Unknown
+model names do not error; they fall back to `"default"`. That is the right
+Phase 1 behavior because cost logging should degrade gracefully when a provider
+starts returning a newer model identifier before config is updated. The tradeoff
+is that a stale config can silently use the default rate until someone updates
+the environment. That is operationally acceptable, but contributors should
+treat the `"default"` rate as a safety net, not as an excuse to leave model
+pricing unmanaged.
+
+Real issues encountered during implementation and testing:
+
+The shared `/home/vic/careercore` tree was already on another issue branch with
+local changes (`issue-35-aicalllog-migration`, modified `notes.md`, and an
+untracked review file). Starting `#36` there would have mixed unrelated work
+into the branch immediately. The fix was to create a dedicated clean worktree
+at `/tmp/careercore-issue36` from `origin/main` and complete the ticket there.
+
+The first isolated test run also failed before executing any assertions because
+`ai_cost_service.py` imports `get_settings()` at module load time, and the new
+unit test had not yet established the minimum required environment variables.
+That was corrected inside the test file itself with explicit `os.environ`
+defaults before importing the service module. This is the same import-time
+settings pattern already documented elsewhere in the repo; the ticket did not
+change that design, it simply had to respect it.
+
+What future contributors should understand before changing it:
+
+If you need to change pricing, change configuration first. Do not put a second
+pricing table back into service code.
+
+If you change the definition of the daily budget window, `reset_at` must change
+in the same PR as the budget rule. Right now the contract is "budget resets at
+the next UTC midnight." That is now observable behavior, not an internal
+implementation detail.
