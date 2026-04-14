@@ -11,9 +11,23 @@ from app.db.session import get_db
 from app.models.user import User
 from app.models.work_experience import WorkExperience
 from app.schemas.profile import WorkExperienceCreate, WorkExperienceRead, WorkExperienceUpdate
+from app.services.file_service import FileService
 from app.services.profile_service import ProfileService
 
 router = APIRouter()
+
+
+async def _validate_source_file_ownership(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    source_file_id: uuid.UUID | None,
+) -> None:
+    if source_file_id is None:
+        return
+
+    record = await FileService(db).get_for_user(user_id, source_file_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source file not found.")
 
 
 @router.get("", response_model=list[WorkExperienceRead])
@@ -36,7 +50,9 @@ async def create_experience(
 ) -> WorkExperienceRead:
     profile_service = ProfileService(db)
     profile = await profile_service.get_or_create(current_user.id)
-    exp = WorkExperience(profile_id=profile.id, **data.model_dump())
+    payload = data.model_dump()
+    await _validate_source_file_ownership(db, current_user.id, payload.get("source_file_id"))
+    exp = WorkExperience(profile_id=profile.id, **payload)
     db.add(exp)
     await db.flush()
     await profile_service.recalculate_completeness(profile)
@@ -61,7 +77,9 @@ async def update_experience(
     exp = result.scalar_one_or_none()
     if exp is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Experience not found.")
-    for field, value in data.model_dump(exclude_none=True).items():
+    updates = data.model_dump(exclude_unset=True)
+    await _validate_source_file_ownership(db, current_user.id, updates.get("source_file_id"))
+    for field, value in updates.items():
         setattr(exp, field, value)
     await db.flush()
     await profile_service.recalculate_completeness(profile)
