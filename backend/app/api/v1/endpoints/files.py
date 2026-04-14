@@ -13,13 +13,6 @@ from app.services.file_service import FileService
 
 router = APIRouter()
 
-_ALLOWED_CONTENT_TYPES = {
-    "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "text/plain",
-}
-_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
-
 
 @router.post("", response_model=FileUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_file(
@@ -28,24 +21,23 @@ async def upload_file(
     db: AsyncSession = Depends(get_db),
 ) -> FileUploadResponse:
     """Upload a resume or supporting document (PDF, DOCX, TXT, max 10 MB)."""
-    if file.content_type not in _ALLOWED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Unsupported file type: {file.content_type}. Allowed: PDF, DOCX, TXT.",
-        )
     data = await file.read()
-    if len(data) > _MAX_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File exceeds 10 MB limit.",
-        )
     service = FileService(db)
-    record = await service.upload(
-        user_id=current_user.id,
-        filename=file.filename or "upload",
-        content_type=file.content_type or "application/octet-stream",
-        data=data,
-    )
+    try:
+        record = await service.upload(
+            user_id=current_user.id,
+            filename=file.filename or "upload",
+            content_type=file.content_type or "application/octet-stream",
+            data=data,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = (
+            status.HTTP_413_CONTENT_TOO_LARGE
+            if detail == "File exceeds 10 MB limit."
+            else status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
     return FileUploadResponse(
         id=record.id,
         status=record.status.value,
