@@ -359,3 +359,37 @@ ADR-008 established that job-fit scoring must be deterministic and must not call
 - Scores are reproducible and traceable back to concrete profile rows.  
 - Resume generation and score explanation can cite stored evidence instead of asking an LLM to rediscover it.  
 - The heuristic stays simple and auditable, but it will under-match some semantic equivalents until richer requirement storage or synonym handling is added in a later phase.
+
+## ADR-018 — Profile completeness is a persisted deterministic weighted score
+
+**Date:** 2026-04-13 (PR #60, issue #16)  
+**Status:** Accepted
+
+**Context:**  
+`profiles.completeness_pct` existed as a stored column but the service layer still returned a placeholder value. The application needed a real completeness signal for the Phase 1 profile model, and that signal had to stay in sync when the user edited either the root profile fields or any of the Phase 1 child sections.
+
+**Decision:**  
+Profile completeness is computed deterministically in `ProfileService` using these Phase 1 weights:
+
+| Section | Weight |
+|---------|--------|
+| `display_name` present | 10% |
+| `current_title` present | 10% |
+| `target_domain` present | 10% |
+| At least 1 work experience | 25% |
+| At least 1 skill | 20% |
+| At least 1 project | 15% |
+| At least 1 certification | 10% |
+
+The score is persisted to `profiles.completeness_pct` whenever:
+- a profile is created
+- the root profile is updated
+- a work experience, skill, project, or certification is created, updated, or deleted
+
+Whitespace-only string fields do not count as present. No AI call is involved.
+
+**Consequences:**  
+- Completeness is stable, auditable, and unit-testable because the score is derived from current DB state rather than AI output.  
+- The stored value can be returned directly to clients without recomputing the formula in frontend code.  
+- Any future Phase 2 profile section must explicitly decide whether it changes the completeness formula; adding a new table alone does not affect the score.  
+- Endpoints mutating profile sub-entities now own the responsibility to trigger a completeness recalculation before the request transaction commits.
