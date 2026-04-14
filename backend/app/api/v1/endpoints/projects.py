@@ -3,7 +3,6 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user
@@ -21,9 +20,8 @@ async def list_projects(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[ProjectRead]:
-    profile = await ProfileService(db).get_or_create(current_user.id)
-    result = await db.execute(select(Project).where(Project.profile_id == profile.id))
-    return [ProjectRead.model_validate(p) for p in result.scalars().all()]
+    projects = await ProfileService(db).list_child_entities_for_user(Project, current_user.id)
+    return [ProjectRead.model_validate(p) for p in projects]
 
 
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
@@ -49,13 +47,16 @@ async def update_project(
     db: AsyncSession = Depends(get_db),
 ) -> ProjectRead:
     profile_service = ProfileService(db)
-    profile = await profile_service.get_or_create(current_user.id)
-    result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.profile_id == profile.id)
+    proj, exists_elsewhere = await profile_service.get_child_entity_access(
+        Project,
+        current_user.id,
+        project_id,
     )
-    proj = result.scalar_one_or_none()
     if proj is None:
+        if exists_elsewhere:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden.")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+    profile = await profile_service.get_or_create(current_user.id)
     for field, value in data.model_dump(exclude_none=True).items():
         setattr(proj, field, value)
     await db.flush()
@@ -70,13 +71,16 @@ async def delete_project(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     profile_service = ProfileService(db)
-    profile = await profile_service.get_or_create(current_user.id)
-    result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.profile_id == profile.id)
+    proj, exists_elsewhere = await profile_service.get_child_entity_access(
+        Project,
+        current_user.id,
+        project_id,
     )
-    proj = result.scalar_one_or_none()
     if proj is None:
+        if exists_elsewhere:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden.")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+    profile = await profile_service.get_or_create(current_user.id)
     await db.delete(proj)
     await db.flush()
     await profile_service.recalculate_completeness(profile)

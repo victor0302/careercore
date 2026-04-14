@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user
 from app.db.session import get_db
+from app.models.uploaded_file import UploadedFile
 from app.models.user import User
 from app.models.work_experience import WorkExperience
 from app.schemas.profile import WorkExperienceCreate, WorkExperienceRead, WorkExperienceUpdate
@@ -26,8 +27,13 @@ async def _validate_source_file_ownership(
         return
 
     record = await FileService(db).get_for_user(user_id, source_file_id)
-    if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source file not found.")
+    if record is not None:
+        return
+
+    result = await db.execute(select(UploadedFile.id).where(UploadedFile.id == source_file_id))
+    if result.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden.")
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source file not found.")
 
 
 @router.get("", response_model=list[WorkExperienceRead])
@@ -35,11 +41,11 @@ async def list_experiences(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[WorkExperienceRead]:
-    profile = await ProfileService(db).get_or_create(current_user.id)
-    result = await db.execute(
-        select(WorkExperience).where(WorkExperience.profile_id == profile.id)
+    experiences = await ProfileService(db).list_child_entities_for_user(
+        WorkExperience,
+        current_user.id,
     )
-    return [WorkExperienceRead.model_validate(e) for e in result.scalars().all()]
+    return [WorkExperienceRead.model_validate(e) for e in experiences]
 
 
 @router.post("", response_model=WorkExperienceRead, status_code=status.HTTP_201_CREATED)
@@ -67,16 +73,16 @@ async def update_experience(
     db: AsyncSession = Depends(get_db),
 ) -> WorkExperienceRead:
     profile_service = ProfileService(db)
-    profile = await profile_service.get_or_create(current_user.id)
-    result = await db.execute(
-        select(WorkExperience).where(
-            WorkExperience.id == experience_id,
-            WorkExperience.profile_id == profile.id,
-        )
+    exp, exists_elsewhere = await profile_service.get_child_entity_access(
+        WorkExperience,
+        current_user.id,
+        experience_id,
     )
-    exp = result.scalar_one_or_none()
     if exp is None:
+        if exists_elsewhere:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden.")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Experience not found.")
+    profile = await profile_service.get_or_create(current_user.id)
     updates = data.model_dump(exclude_unset=True)
     await _validate_source_file_ownership(db, current_user.id, updates.get("source_file_id"))
     for field, value in updates.items():
@@ -93,16 +99,16 @@ async def delete_experience(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     profile_service = ProfileService(db)
-    profile = await profile_service.get_or_create(current_user.id)
-    result = await db.execute(
-        select(WorkExperience).where(
-            WorkExperience.id == experience_id,
-            WorkExperience.profile_id == profile.id,
-        )
+    exp, exists_elsewhere = await profile_service.get_child_entity_access(
+        WorkExperience,
+        current_user.id,
+        experience_id,
     )
-    exp = result.scalar_one_or_none()
     if exp is None:
+        if exists_elsewhere:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden.")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Experience not found.")
+    profile = await profile_service.get_or_create(current_user.id)
     await db.delete(exp)
     await db.flush()
     await profile_service.recalculate_completeness(profile)

@@ -118,8 +118,8 @@ async def test_work_experience_rejects_other_users_source_file(client, mock_user
             "start_date": str(date(2024, 1, 1)),
         },
     )
-    assert create_response.status_code == 404
-    assert create_response.json()["detail"] == "Source file not found."
+    assert create_response.status_code == 403
+    assert create_response.json()["detail"] == "Forbidden."
 
     experience = WorkExperience(
         id=uuid.uuid4(),
@@ -137,5 +137,5 @@ async def test_work_experience_rejects_other_users_source_file(client, mock_user
         headers=headers,
         json={"source_file_id": str(other_file.id)},
     )
-    assert update_response.status_code == 404
-    assert update_response.json()["detail"] == "Source file not found."
+    assert update_response.status_code == 403
+    assert update_response.json()["detail"] == "Forbidden."
