@@ -748,7 +748,74 @@ directly (ADR-012).
 
 ---
 
-## ADR-031 — Malformed request validation is schema-enforced and fails before handlers run
+## ADR-031 — File uploads use opaque object keys and queue extraction only after storage succeeds
+
+**Date:** 2026-04-14 (issue #18)  
+**Status:** Accepted
+
+**Context:**  
+The initial upload flow accepted files and persisted `UploadedFile`, but the hardening rules were incomplete: storage keys still embedded the original filename, validation lived only in the endpoint, and extraction work was not enqueued after a successful upload. That left the object-store path more revealing than necessary and made the upload lifecycle contract weaker than the model and worker design implied.
+
+**Decision:**  
+- `FileService.upload()` owns upload validation for allowed MIME types and the 10 MB size limit.  
+- Object storage keys are opaque UUID-based paths and must not include the original filename. The filename is stored only in `UploadedFile.original_filename`.  
+- `UploadedFile` rows are created in `pending` state after successful object storage.  
+- Extraction is queued only after storage succeeds and the `UploadedFile` row has been flushed.  
+- The upload endpoint maps service validation failures to HTTP:
+  - unsupported MIME type → `415`
+  - oversized payload → `413`
+
+**Consequences:**  
+- Object-storage paths no longer leak user-supplied filenames.  
+- Upload validation, persistence, and queue-triggering are enforced in one service boundary instead of being split across transport-only code.  
+- The upload lifecycle is now explicit: store object, persist `pending` metadata, enqueue extraction. Full extraction processing remains separate worker-scope work.
+
+---
+
+## ADR-032 — AICallLog has no FK on user_id and cost_usd uses Numeric not Float
+
+**Date:** 2026-04-14 (issue #35)  
+**Status:** Accepted
+
+**Context:**  
+The `AICallLog` ORM model was written without a migration. Two non-obvious
+choices in that model needed to be locked in at the database layer:
+
+1. `user_id` carries no `ForeignKeyConstraint`. This looks like an oversight
+   but is intentional — the model comment says so. The same pattern applies to
+   `audit_logs` (ADR-012).
+
+2. `cost_usd` is typed `Numeric(10, 6)` in the ORM but the column could have
+   been mapped to a plain `Float`. Those two types behave very differently and
+   the choice matters for financial correctness.
+
+**Decision:**  
+- `user_id` in `ai_call_logs` has **no foreign key constraint**. No `ON DELETE`
+  clause. No referential integrity enforcement at the database level for that
+  column.  
+- `cost_usd` is `Numeric(10, 6)` — exact decimal arithmetic, 10 total digits,
+  6 after the decimal point.  
+- The composite index `ix_ai_call_logs_user_created` on `(user_id, created_at)`
+  is the primary query path for budget checks: "how many tokens has this user
+  consumed today?"
+
+**Consequences:**  
+- Deleting a user row does not cascade-delete their AI call history. Cost and
+  billing records are permanent, even if the account is gone. This matches
+  ADR-012 (audit logs survive user deletion).  
+- `Numeric(10, 6)` is an exact type. `0.000004 + 0.000004 = 0.000008`, always.
+  `Float` uses IEEE 754 binary representation and accumulates rounding error —
+  acceptable for physics, unacceptable for money. Even at micro-dollar
+  granularity, summing thousands of log rows with a float column will produce
+  subtly wrong totals.  
+- The composite index order matters: `(user_id, created_at)` means the database
+  can answer "all logs for user X since date Y" with a single index scan.
+  Reversing the order to `(created_at, user_id)` would make date-range scans
+  across all users fast but per-user budget queries slow.
+
+---
+
+## ADR-033 — Malformed request validation is schema-enforced and fails before handlers run
 
 **Date:** 2026-04-14 (issue #41)  
 **Status:** Accepted

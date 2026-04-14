@@ -1,6 +1,7 @@
 """File service — upload, retrieve, and delete files via MinIO."""
 
 import uuid
+from pathlib import Path
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -9,8 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.uploaded_file import FileStatus, UploadedFile
+from app.workers.tasks.extraction_tasks import extract_file_text
 
 settings = get_settings()
+
+ALLOWED_CONTENT_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/plain",
+}
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
 def _get_s3_client() -> "boto3.client":  # type: ignore[name-defined]
@@ -37,15 +46,23 @@ class FileService:
         """Upload a file to MinIO and create an UploadedFile record.
 
         Steps:
-          1. Generate a unique storage key (user_id/file_id/filename).
+          1. Validate MIME type and size limits.
+          2. Generate a unique opaque storage key.
           2. Upload bytes to MinIO.
           3. Persist UploadedFile with status=pending.
           4. Enqueue extraction_tasks.extract_file_text.delay(file_id).
-
-        TODO: Enqueue the Celery extraction task in step 4.
         """
+        if content_type not in ALLOWED_CONTENT_TYPES:
+            raise ValueError(
+                f"Unsupported file type: {content_type}. Allowed: PDF, DOCX, TXT."
+            )
+
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise ValueError("File exceeds 10 MB limit.")
+
         file_id = uuid.uuid4()
-        storage_key = f"{user_id}/{file_id}/{filename}"
+        suffix = Path(filename).suffix.lower()
+        storage_key = f"{user_id}/{file_id}{suffix}"
 
         try:
             self._s3.put_object(
@@ -68,6 +85,7 @@ class FileService:
         )
         self._db.add(record)
         await self._db.flush()
+        extract_file_text.delay(str(file_id))
         return record
 
     async def get_for_user(self, user_id: uuid.UUID, file_id: uuid.UUID) -> UploadedFile | None:

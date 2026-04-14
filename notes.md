@@ -2605,7 +2605,102 @@ If a future endpoint or service touches `WorkExperience`, `Project`, `Skill`,
 or `Certification`, reuse the `ProfileService` ownership boundary instead of
 re-inventing entity-specific access logic in the endpoint.
 
-### 12.28 Issue #41 — Input validation audit and malformed payload coverage
+### 12.28 Issue #18 — Harden POST /files validation, storage key generation, and queueing
+
+This ticket finished the basic safety contract for `POST /files`.
+
+Before this change, the upload endpoint already rejected unsupported MIME types
+and files larger than 10 MB, but those rules lived only in the HTTP layer. The
+service still generated storage keys by embedding the original filename, and it
+never actually queued extraction work after a successful upload.
+
+What changed:
+- moved upload validation into `FileService.upload()` so the service, not just
+  the endpoint, enforces:
+  - allowed MIME types
+  - 10 MB size limit
+- changed storage key generation from:
+  - `user_id/file_id/original_filename`
+  to:
+  - `user_id/file_id.ext`
+- kept the original filename only in `UploadedFile.original_filename`
+- persisted `UploadedFile` in `pending` state after successful object storage
+- queued `extract_file_text.delay(str(file_id))` after the row was flushed
+- updated the endpoint to translate service validation failures into:
+  - `415 Unsupported Media Type`
+  - `413 Content Too Large`
+- added focused unit coverage for:
+  - validation failures
+  - opaque storage-key behavior
+  - `pending` record creation
+  - extraction task queue trigger
+  - endpoint HTTP mapping
+
+Why implement it this way?
+
+Because ADR-005 is right: the service layer should own the business contract.
+
+Validation matters beyond HTTP. If the same upload flow is later triggered from
+another entry point, such as CLI or background import code, the rules should
+not depend on whether a specific FastAPI endpoint happened to run first. Moving
+the checks into `FileService.upload()` makes the contract reusable and keeps the
+endpoint thin.
+
+Why remove the original filename from the storage key?
+
+Because the storage key is an internal object-store identifier, not a
+user-facing path. Embedding the original filename leaks unnecessary user input
+into infrastructure paths and makes keys less stable as an internal contract.
+The system already has a dedicated field for the user-facing filename:
+`UploadedFile.original_filename`.
+
+Keeping only the extension in the key is the pragmatic middle ground. It avoids
+full filename leakage while still preserving enough suffix information to make
+storage objects easier to inspect during debugging.
+
+Important tradeoffs:
+
+This ticket queues extraction after a successful upload, but it does not
+implement extraction success/failure handling itself. That remains worker-scope
+behavior. The point here was to make the upload path reliably hand work off to
+the queue, not to finish the entire extraction pipeline.
+
+The service currently flushes the `UploadedFile` row before queueing so the
+worker has a durable file ID to target. If queue submission were to fail after
+flush, the request would still fail upward at that point. This ticket does not
+add compensating cleanup for already-uploaded objects because that would widen
+scope into retry/cleanup policy.
+
+Real issues encountered during implementation and testing:
+
+The shared `/home/vic/careercore` worktree was again unusable for issue work
+because it was on another branch with local changes. The ticket was moved into
+a dedicated clean worktree from `origin/main` immediately.
+
+The focused test run also hit the repo’s broad import surface: file-service and
+endpoint modules pull in settings, auth, Celery, and async DB dependencies at
+import time. The verification command therefore needed those dependencies
+present even though the tests themselves only exercised mocked S3 and Celery
+boundaries.
+
+One service test initially failed because constructing a real `UploadedFile`
+triggered an unrelated SQLAlchemy mapper problem in `User.ai_call_logs`. The
+fix was to isolate that test from unrelated mapper configuration by patching
+the record class in the test itself. That kept the ticket scoped to file-upload
+behavior instead of dragging in unrelated ORM cleanup.
+
+What future contributors should understand:
+
+If you touch file upload behavior, preserve these boundaries:
+- validation belongs in `FileService.upload()`
+- storage keys are internal opaque identifiers, not filename mirrors
+- queue submission happens only after storage succeeds and the metadata row
+  exists in `pending`
+
+Do not move signed-download response work back into this path. Upload and
+download hardening are separate contracts in this codebase.
+
+### 12.29 Issue #41 — Input validation audit and malformed payload coverage
 
 This ticket was about closing a contract gap, not adding new business logic.
 
