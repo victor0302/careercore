@@ -31,6 +31,18 @@ def _get_s3_client() -> "boto3.client":  # type: ignore[name-defined]
     )
 
 
+def download_object_bytes(storage_key: str) -> bytes:
+    """Download raw file bytes from object storage."""
+    s3 = _get_s3_client()
+    try:
+        response = s3.get_object(Bucket=settings.MINIO_BUCKET, Key=storage_key)
+    except (BotoCoreError, ClientError) as exc:
+        raise RuntimeError(f"Failed to download from MinIO: {exc}") from exc
+
+    body = response["Body"]
+    return body.read()
+
+
 class FileService:
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
