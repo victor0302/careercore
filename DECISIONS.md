@@ -393,6 +393,7 @@ Whitespace-only string fields do not count as present. No AI call is involved.
 - The stored value can be returned directly to clients without recomputing the formula in frontend code.  
 - Any future Phase 2 profile section must explicitly decide whether it changes the completeness formula; adding a new table alone does not affect the score.  
 - Endpoints mutating profile sub-entities now own the responsibility to trigger a completeness recalculation before the request transaction commits.
+
 ---
 
 ## ADR-019 — Route protection is default-deny; public exceptions are explicit
@@ -423,3 +424,27 @@ The API already used `get_current_user` on most non-public endpoints, but the ru
 - Clients get the correct auth semantics for missing and expired access tokens; `403` is reserved for authorization failures after authentication.  
 - The auth boundary stays testable even when full app-import integration tests are temporarily constrained by import-time settings and database bootstrap coupling.  
 - Production deployments no longer expose the interactive API docs or OpenAPI schema unless that policy is changed deliberately.
+
+---
+
+## ADR-020 — Signed file download URLs are owner-resolved, short-lived, and schema-limited
+
+**Date:** 2026-04-13 (issue #20)  
+**Status:** Accepted
+
+**Context:**  
+The file-download flow exposed three concrete risks: the signed URL endpoint needed to enforce ownership consistently, the presigned URL lifetime was too long for a Phase 1 download token, and the file API had no explicit response schemas preventing accidental leakage of internal storage identifiers such as `storage_key`.
+
+**Decision:**  
+- Signed download URLs are resolved through `FileService.get_download_url_for_user(user_id, file_id)`, not by generating a URL from an already-exposed storage key in the endpoint.  
+- The signed download URL TTL is configured by `FILE_DOWNLOAD_URL_TTL_SECONDS` and defaults to `300` seconds.  
+- File API responses use explicit Pydantic schemas:
+  - upload response: `id`, `status`, `filename`
+  - signed URL response: `url`
+- If `file_id` does not exist or does not belong to the authenticated user, the endpoint returns `404 File not found.`
+
+**Consequences:**  
+- Ownership enforcement for file downloads stays at the service boundary, matching ADR-013 instead of relying on endpoint-local handling.  
+- Short-lived presigned URLs reduce the usefulness of a leaked download link without changing the stored file metadata model.  
+- `storage_key` remains an internal storage concern; adding it to outward-facing schemas is now a contract change, not a casual endpoint edit.  
+- Future file endpoints should add response models first and only expose fields that the client actually needs.

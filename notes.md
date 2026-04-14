@@ -1423,6 +1423,7 @@ What future contributors should understand before changing it:
 you add a new profile section, change the weights, or move recalculation out of
 mutation paths, you are changing user-visible behavior and should update both
 the ADR and the tests in the same PR.
+
 ### 12.15 Issue #10 — Enforce auth on non-public routes and document public exceptions
 
 This issue was partly an implementation fix and partly a boundary audit.
@@ -1496,3 +1497,77 @@ add a new route and it does not belong in the small public exception set, wire
 `get_current_user` into the endpoint immediately and extend the tests in the
 same PR. If you think a new route should be public, treat that as a security
 policy change, not a convenience tweak.
+
+### 12.16 Issue #20 — Harden signed URL ownership and response contract
+
+This ticket tightened the file-download path around three concrete rules:
+ownership must be enforced before a signed URL is generated, the URL must be
+short-lived, and internal storage identifiers must stay out of API payloads.
+
+What changed:
+- added `FILE_DOWNLOAD_URL_TTL_SECONDS` to configuration with a default of
+  `300` seconds
+- moved signed-download resolution into
+  `FileService.get_download_url_for_user(user_id, file_id)` so the endpoint no
+  longer fetches a file row and then separately generates a URL from
+  `storage_key`
+- changed `FileService.get_presigned_url()` to default to the configured short
+  TTL instead of the previous one-hour default
+- added explicit file response schemas:
+  - upload response returns only `id`, `status`, and `filename`
+  - signed URL response returns only `url`
+- updated `GET /files/{file_id}/url` to return `404` when the file is missing
+  or not owned by the authenticated user
+- added focused unit coverage for:
+  - owner-only URL resolution
+  - short TTL enforcement
+  - `404` behavior for missing IDs
+  - response payloads that do not expose `storage_key`
+
+Why move the ownership check into `FileService` instead of keeping it in the
+endpoint?
+
+Because signed URL generation is part of the file access rule, not just HTTP
+formatting. The endpoint should ask one question: "give me the download URL for
+this user and file." It should not know or care how the storage key is looked
+up or how the presigned URL is generated. That keeps ownership and URL issuance
+in one place and makes it harder for a future endpoint to bypass the same rule.
+
+Why add explicit response schemas for a small endpoint?
+
+Because "small endpoint" is not a defense against accidental leakage.
+
+Before this change, the file endpoints returned untyped dictionaries. That works
+until someone adds a convenience field in a hurry and accidentally exposes
+`storage_key` or some other internal field. The schema now makes the public
+contract visible in code review: if a new field appears, it is an explicit API
+change.
+
+Important tradeoff:
+
+The hardening here is deliberately narrow. The signed URL remains a plain MinIO
+presigned URL, and the implementation does not add download audit logging,
+single-use tokens, or file-level authorization concepts beyond ownership. That
+is the right scope for Phase 1. The immediate requirement was to make the
+existing download flow safe enough and predictable enough, not to build a full
+document-sharing system.
+
+Real issues encountered during implementation and testing:
+- The shared `/home/vic/careercore` worktree changed underneath the task and
+  picked up unrelated branch state (`issue-42-error-request-id`) plus unrelated
+  file modifications. Continuing there would have mixed issue `#20` work with
+  another ticket's diff.
+- The implementation was therefore replayed in a clean worktree from
+  `origin/main`, which was the correct isolation boundary.
+- The repository's shared backend test bootstrap still imports more application
+  surface than these focused tests need, so verification ran with
+  `pytest --noconftest` and explicit ephemeral dependencies rather than through
+  the broader test harness.
+
+What future contributors should understand before changing it:
+
+The public file contract is now intentionally smaller than the internal
+`UploadedFile` model. If a future client asks for more file metadata, add it
+deliberately through the schema and decide whether it is safe to expose. Do not
+short-circuit that decision by returning ORM fields or raw dictionaries from
+the endpoint.
