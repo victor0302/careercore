@@ -12,6 +12,7 @@ from app.ai.schemas import (
     RecommendationSummary,
     ScoreBreakdown,
     ScoreExplanation,
+    TokenUsage,
 )
 
 
@@ -26,14 +27,15 @@ class AIProvider(Protocol):
     (via AICostService) before invoking any method and log the result afterward.
     """
 
-    async def parse_job_description(self, raw_text: str) -> ParsedJD:
+    async def parse_job_description(self, raw_text: str) -> tuple[ParsedJD, TokenUsage]:
         """Parse a raw job description string into structured requirements.
 
         Args:
             raw_text: The full text of the job posting.
 
         Returns:
-            ParsedJD with title, company, and a list of JobRequirementItems.
+            ParsedJD with title, company, and a list of JobRequirementItems,
+            plus TokenUsage for billing/logging.
 
         Raises:
             InvalidOutputError: If the model returns unparseable output.
@@ -44,7 +46,7 @@ class AIProvider(Protocol):
 
     async def generate_bullets(
         self, contexts: list[BulletContext], max_bullets: int = 5
-    ) -> list[GeneratedBullet]:
+    ) -> tuple[list[GeneratedBullet], TokenUsage]:
         """Generate evidence-backed resume bullets for a set of job requirements.
 
         Each context ties one profile entity (work experience or project) to one
@@ -56,7 +58,7 @@ class AIProvider(Protocol):
             max_bullets: Maximum number of bullets to return.
 
         Returns:
-            List of GeneratedBullet ordered by confidence descending.
+            List of GeneratedBullet ordered by confidence descending, plus TokenUsage.
 
         Raises:
             InvalidOutputError, ProviderUnavailableError, RateLimitError.
@@ -65,7 +67,7 @@ class AIProvider(Protocol):
 
     async def explain_score(
         self, breakdown: ScoreBreakdown, job_title: str
-    ) -> ScoreExplanation:
+    ) -> tuple[ScoreExplanation, TokenUsage]:
         """Generate a natural-language explanation of a fit score.
 
         Uses the score breakdown (matched, partial, missing requirements) to
@@ -76,35 +78,42 @@ class AIProvider(Protocol):
             job_title: The job title being targeted.
 
         Returns:
-            ScoreExplanation with headline, strengths, gaps, and recommendation.
+            ScoreExplanation with headline, strengths, gaps, and recommendation,
+            plus TokenUsage.
 
         Raises:
             InvalidOutputError, ProviderUnavailableError, RateLimitError.
         """
         ...
 
-    async def answer_followup(self, question: FollowUpQuestion) -> FollowUpAnswer:
+    async def answer_followup(
+        self, question: FollowUpQuestion
+    ) -> tuple[FollowUpAnswer, TokenUsage]:
         """Answer a user's follow-up question about their career analysis.
 
         Args:
             question: FollowUpQuestion containing the question text and relevant context.
 
         Returns:
-            FollowUpAnswer with a natural-language response and cited sources.
+            FollowUpAnswer with a natural-language response and cited sources,
+            plus TokenUsage.
 
         Raises:
             InvalidOutputError, ProviderUnavailableError, RateLimitError.
         """
         ...
 
-    async def generate_recommendations(self, context: GapContext) -> RecommendationSummary:
+    async def generate_recommendations(
+        self, context: GapContext
+    ) -> tuple[RecommendationSummary, TokenUsage]:
         """Generate actionable recommendations to close identified skill gaps.
 
         Args:
             context: GapContext with missing requirements and user profile summary.
 
         Returns:
-            RecommendationSummary with a prioritized list of actionable steps.
+            RecommendationSummary with a prioritized list of actionable steps,
+            plus TokenUsage.
 
         Raises:
             InvalidOutputError, ProviderUnavailableError, RateLimitError.
@@ -113,7 +122,7 @@ class AIProvider(Protocol):
 
     async def generate_learning_plan(
         self, recommendations: RecommendationSummary, timeline_weeks: int = 12
-    ) -> str:
+    ) -> tuple[str, TokenUsage]:
         """Generate a week-by-week learning plan based on recommendations.
 
         Args:
@@ -121,7 +130,7 @@ class AIProvider(Protocol):
             timeline_weeks: Total number of weeks in the plan.
 
         Returns:
-            A Markdown-formatted learning plan string.
+            A Markdown-formatted learning plan string, plus TokenUsage.
 
         Raises:
             InvalidOutputError, ProviderUnavailableError, RateLimitError.

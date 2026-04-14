@@ -30,11 +30,9 @@ from app.ai.schemas import (
     RecommendationSummary,
     ScoreBreakdown,
     ScoreExplanation,
+    TokenUsage,
 )
 from app.core.config import get_settings
-
-_HAIKU_MODEL = "claude-haiku-4-5-20251001"
-_SONNET_MODEL = "claude-sonnet-4-6"
 
 settings = get_settings()
 
@@ -44,11 +42,16 @@ class AnthropicProvider:
 
     def __init__(self) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        self._haiku = settings.AI_HAIKU_MODEL
+        self._sonnet = settings.AI_SONNET_MODEL
+        self.parse_job_model = self._haiku
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    async def _call(self, model: str, system: str, user: str, max_tokens: int = 2048) -> tuple[str, anthropic.types.Usage, int]:
-        """Call the Anthropic API and return (content, usage, latency_ms).
+    async def _call(
+        self, model: str, system: str, user: str, max_tokens: int = 2048
+    ) -> tuple[str, TokenUsage]:
+        """Call the Anthropic API and return (content, TokenUsage).
 
         Raises ProviderUnavailableError, RateLimitError on API errors.
         """
@@ -69,7 +72,14 @@ class AnthropicProvider:
 
         latency_ms = int((time.monotonic() - start) * 1000)
         content = msg.content[0].text if msg.content else ""
-        return content, msg.usage, latency_ms
+        usage = TokenUsage(
+            prompt_tokens=msg.usage.input_tokens,
+            completion_tokens=msg.usage.output_tokens,
+            total_tokens=msg.usage.input_tokens + msg.usage.output_tokens,
+            latency_ms=latency_ms,
+            model=model,
+        )
+        return content, usage
 
     def _parse_json(self, raw: str, schema_name: str) -> dict:  # type: ignore[type-arg]
         """Extract and parse the first JSON object from model output.
@@ -92,7 +102,7 @@ class AnthropicProvider:
 
     # ── AIProvider methods ────────────────────────────────────────────────────
 
-    async def parse_job_description(self, raw_text: str) -> ParsedJD:
+    async def parse_job_description(self, raw_text: str) -> tuple[ParsedJD, TokenUsage]:
         system = (
             "You are a career analyst. Parse the job description and return ONLY valid JSON "
             "matching this schema: "
@@ -100,22 +110,25 @@ class AnthropicProvider:
             '"category": "skill"|"experience"|"education"|"tool"|"domain", '
             '"is_required": bool}], "summary": str}. No explanation, no markdown.'
         )
-        content, _usage, _latency = await self._call(_HAIKU_MODEL, system, raw_text)
+        content, usage = await self._call(self._haiku, system, raw_text)
         data = self._parse_json(content, "ParsedJD")
         try:
             reqs = [JobRequirementItem(**r) for r in data.get("requirements", [])]
-            return ParsedJD(
-                title=data["title"],
-                company=data.get("company"),
-                requirements=reqs,
-                summary=data.get("summary"),
+            return (
+                ParsedJD(
+                    title=data["title"],
+                    company=data.get("company"),
+                    requirements=reqs,
+                    summary=data.get("summary"),
+                ),
+                usage,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise InvalidOutputError(f"ParsedJD schema mismatch: {exc}") from exc
 
     async def generate_bullets(
         self, contexts: list[BulletContext], max_bullets: int = 5
-    ) -> list[GeneratedBullet]:
+    ) -> tuple[list[GeneratedBullet], TokenUsage]:
         ctx_text = "\n\n".join(
             f"Entity: {c.profile_entity_type} ({c.profile_entity_id})\n"
             f"Summary: {c.entity_summary}\n"
@@ -129,27 +142,30 @@ class AnthropicProvider:
             '"evidence_entity_id": str, "confidence": float 0-1}]}. '
             f"Return at most {max_bullets} bullets, ordered by confidence descending."
         )
-        content, _usage, _latency = await self._call(
-            _SONNET_MODEL, system, ctx_text, max_tokens=1024
+        content, usage = await self._call(
+            self._sonnet, system, ctx_text, max_tokens=1024
         )
         data = self._parse_json(content, "GeneratedBullets")
         try:
             import uuid as _uuid
-            return [
-                GeneratedBullet(
-                    text=b["text"],
-                    evidence_entity_type=b["evidence_entity_type"],
-                    evidence_entity_id=_uuid.UUID(b["evidence_entity_id"]),
-                    confidence=float(b["confidence"]),
-                )
-                for b in data["bullets"][:max_bullets]
-            ]
+            return (
+                [
+                    GeneratedBullet(
+                        text=b["text"],
+                        evidence_entity_type=b["evidence_entity_type"],
+                        evidence_entity_id=_uuid.UUID(b["evidence_entity_id"]),
+                        confidence=float(b["confidence"]),
+                    )
+                    for b in data["bullets"][:max_bullets]
+                ],
+                usage,
+            )
         except (KeyError, TypeError, ValueError) as exc:
             raise InvalidOutputError(f"GeneratedBullets schema mismatch: {exc}") from exc
 
     async def explain_score(
         self, breakdown: ScoreBreakdown, job_title: str
-    ) -> ScoreExplanation:
+    ) -> tuple[ScoreExplanation, TokenUsage]:
         payload = (
             f"Job: {job_title}\n"
             f"Total score: {breakdown.total_score:.1f}/100\n"
@@ -162,28 +178,32 @@ class AnthropicProvider:
             "Return ONLY valid JSON: "
             '{"headline": str, "strengths": [str], "gaps": [str], "recommendation": str}.'
         )
-        content, _usage, _latency = await self._call(_HAIKU_MODEL, system, payload)
+        content, usage = await self._call(self._haiku, system, payload)
         data = self._parse_json(content, "ScoreExplanation")
         try:
-            return ScoreExplanation(**data)
+            return ScoreExplanation(**data), usage
         except (TypeError, ValueError) as exc:
             raise InvalidOutputError(f"ScoreExplanation schema mismatch: {exc}") from exc
 
-    async def answer_followup(self, question: FollowUpQuestion) -> FollowUpAnswer:
+    async def answer_followup(
+        self, question: FollowUpQuestion
+    ) -> tuple[FollowUpAnswer, TokenUsage]:
         payload = f"Context:\n{question.context_summary}\n\nQuestion: {question.question}"
         system = (
             "You are a career intelligence assistant. Answer the question based on the provided "
             "career context. Return ONLY valid JSON: "
             '{"answer": str, "sources": [str]}.'
         )
-        content, _usage, _latency = await self._call(_SONNET_MODEL, system, payload)
+        content, usage = await self._call(self._sonnet, system, payload)
         data = self._parse_json(content, "FollowUpAnswer")
         try:
-            return FollowUpAnswer(**data)
+            return FollowUpAnswer(**data), usage
         except (TypeError, ValueError) as exc:
             raise InvalidOutputError(f"FollowUpAnswer schema mismatch: {exc}") from exc
 
-    async def generate_recommendations(self, context: GapContext) -> RecommendationSummary:
+    async def generate_recommendations(
+        self, context: GapContext
+    ) -> tuple[RecommendationSummary, TokenUsage]:
         gaps_text = "\n".join(f"- {r.text} ({r.category})" for r in context.missing_requirements)
         payload = f"User Profile:\n{context.user_summary}\n\nMissing Requirements:\n{gaps_text}"
         system = (
@@ -193,7 +213,7 @@ class AnthropicProvider:
             '"action_description": str, "estimated_effort": str, "resources": [str]}], '
             '"priority_order": [str]}.'
         )
-        content, _usage, _latency = await self._call(_SONNET_MODEL, system, payload, max_tokens=2048)
+        content, usage = await self._call(self._sonnet, system, payload, max_tokens=2048)
         data = self._parse_json(content, "RecommendationSummary")
         try:
             recs = [
@@ -209,16 +229,19 @@ class AnthropicProvider:
                 )
                 for rec in data.get("recommendations", [])
             ]
-            return RecommendationSummary(
-                recommendations=recs,
-                priority_order=data.get("priority_order", []),
+            return (
+                RecommendationSummary(
+                    recommendations=recs,
+                    priority_order=data.get("priority_order", []),
+                ),
+                usage,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise InvalidOutputError(f"RecommendationSummary schema mismatch: {exc}") from exc
 
     async def generate_learning_plan(
         self, recommendations: RecommendationSummary, timeline_weeks: int = 12
-    ) -> str:
+    ) -> tuple[str, TokenUsage]:
         recs_text = "\n".join(
             f"- {r.action_description} (effort: {r.estimated_effort})"
             for r in recommendations.recommendations
@@ -230,7 +253,7 @@ class AnthropicProvider:
             "You are a career coach. Create a week-by-week learning plan in Markdown format. "
             "Be concise and actionable."
         )
-        content, _usage, _latency = await self._call(
-            _SONNET_MODEL, system, payload, max_tokens=2048
+        content, usage = await self._call(
+            self._sonnet, system, payload, max_tokens=2048
         )
-        return content
+        return content, usage

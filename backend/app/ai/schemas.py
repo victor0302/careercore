@@ -34,6 +34,16 @@ class ParsedJD(BaseModel):
     summary: str | None = None
 
 
+class TokenUsage(BaseModel):
+    """Token accounting metadata for a single provider call."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    latency_ms: int = 0
+    model: str
+
+
 # ── Bullet Generation ─────────────────────────────────────────────────────────
 
 

@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     # AI
     AI_PROVIDER: Literal["anthropic", "mock"] = "mock"
     ANTHROPIC_API_KEY: str = ""
+    AI_HAIKU_MODEL: str = "claude-haiku-4-5-20251001"
+    AI_SONNET_MODEL: str = "claude-sonnet-4-6"
 
     # JWT
     JWT_SECRET_KEY: str

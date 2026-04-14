@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.dependencies import get_ai_provider
+from app.ai.exceptions import BudgetExceededError
 from app.ai.provider import AIProvider
 from app.core.dependencies import get_current_user
 from app.db.session import get_db
@@ -70,6 +71,11 @@ async def parse_job(
     service = JobService(db, ai)
     try:
         job = await service.parse(current_user.id, job_id)
+    except BudgetExceededError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Daily AI token budget exceeded.",
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return JobDescriptionRead.model_validate(job)
