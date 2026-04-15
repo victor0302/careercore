@@ -10,7 +10,7 @@ from app.ai.provider import AIProvider
 from app.core.dependencies import get_current_user
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.resume import ResumeCreate, ResumeRead
+from app.schemas.resume import ResumeCreate, ResumeRead, ResumeVersionDetailRead
 from app.services.resume_service import ResumeService
 
 router = APIRouter()
@@ -39,6 +39,21 @@ async def create_resume(
     service = ResumeService(db, ai)
     resume = await service.create(current_user.id, data)
     return ResumeRead.model_validate(resume)
+
+
+@router.get("/versions/{version_id}", response_model=ResumeVersionDetailRead)
+async def get_resume_version_detail(
+    version_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    ai: AIProvider = Depends(get_ai_provider),
+) -> ResumeVersionDetailRead:
+    """Get a resume version detail with current approved bullets and evidence metadata."""
+    service = ResumeService(db, ai)
+    detail = await service.get_version_detail(current_user.id, version_id)
+    if detail is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found.")
+    return detail
 
 
 @router.get("/{resume_id}", response_model=ResumeRead)

@@ -3,11 +3,19 @@
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.provider import AIProvider
 from app.models.resume import Resume, ResumeBullet, ResumeVersion
-from app.schemas.resume import ResumeCreate
+from app.models.project import Project
+from app.models.work_experience import WorkExperience
+from app.schemas.resume import (
+    EvidenceLinkRead,
+    ResumeBulletWithEvidence,
+    ResumeCreate,
+    ResumeVersionDetailRead,
+)
 
 
 class ResumeService:
@@ -43,6 +51,73 @@ class ResumeService:
             )
         )
         return result.scalar_one_or_none()
+
+    async def get_version_detail(
+        self,
+        user_id: uuid.UUID,
+        version_id: uuid.UUID,
+    ) -> ResumeVersionDetailRead | None:
+        """Return a version detail view with current approved bullets and resolved evidence."""
+        result = await self._db.execute(
+            select(ResumeVersion)
+            .where(ResumeVersion.id == version_id)
+            .options(joinedload(ResumeVersion.resume).joinedload(Resume.job))
+        )
+        version = result.scalar_one_or_none()
+        if version is None or version.resume.user_id != user_id:
+            return None
+
+        bullets_result = await self._db.execute(
+            select(ResumeBullet)
+            .where(
+                ResumeBullet.resume_id == version.resume_id,
+                ResumeBullet.is_approved.is_(True),
+            )
+            .options(selectinload(ResumeBullet.evidence_links))
+            .order_by(ResumeBullet.created_at)
+        )
+        bullets = list(bullets_result.scalars().all())
+
+        bullet_details: list[ResumeBulletWithEvidence] = []
+        for bullet in bullets:
+            evidence_reads: list[EvidenceLinkRead] = []
+            for link in bullet.evidence_links:
+                if link.source_entity_type == "work_experience":
+                    entity = await self._db.get(WorkExperience, link.source_entity_id)
+                    display_name = (
+                        f"{entity.role_title} at {entity.employer}" if entity else "Unknown"
+                    )
+                else:
+                    entity = await self._db.get(Project, link.source_entity_id)
+                    display_name = entity.name if entity else "Unknown"
+
+                evidence_reads.append(
+                    EvidenceLinkRead(
+                        source_entity_type=link.source_entity_type,
+                        source_entity_id=link.source_entity_id,
+                        display_name=display_name,
+                    )
+                )
+
+            bullet_details.append(
+                ResumeBulletWithEvidence(
+                    id=bullet.id,
+                    text=bullet.text,
+                    confidence=bullet.confidence,
+                    evidence=evidence_reads,
+                )
+            )
+
+        job = version.resume.job
+        return ResumeVersionDetailRead(
+            id=version.id,
+            resume_id=version.resume_id,
+            fit_score_at_gen=version.fit_score_at_gen,
+            created_at=version.created_at,
+            job_title=job.title if job else None,
+            job_company=job.company if job else None,
+            bullets=bullet_details,
+        )
 
     async def generate_bullets(
         self,
