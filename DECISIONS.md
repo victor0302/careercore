@@ -980,3 +980,39 @@ integration test for MinIO or boto3.
 - If MinIO or boto3 integration needs to be tested later, that should be added
   as a separate infrastructure-level test path instead of bloating the endpoint
   contract tests.
+
+---
+
+## ADR-037 — Resume bullet approval and rejection are ownership-scoped by resume, not bullet alone
+
+**Date:** 2026-04-15 (issue #29)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#29` adds the approve and reject flows for generated resume bullets.
+The core design question was how ownership should be enforced. A bullet is not
+an independent top-level resource in this model: it belongs to a `Resume`, and
+the `Resume` belongs to a `User`. That means bullet mutation must validate the
+resume ownership boundary, not just whether a `bullet_id` exists.
+
+**Decision:**  
+- Approve/reject operations scope the lookup by both `resume_id` and `bullet_id`
+  and join through `Resume` to require `Resume.user_id == user_id`.  
+- If the bullet is missing or belongs to another user's resume, the service
+  returns a not-found result rather than exposing cross-user existence.  
+- Approval is an in-place mutation: `is_approved = True`, then flush.  
+- Rejection is modeled as deletion of the `ResumeBullet` row. `EvidenceLink`
+  cleanup relies on the existing `ON DELETE CASCADE` relationship rather than
+  manual child-row deletion in the service layer.  
+- The HTTP API maps:
+  - approve success → `200` with `ResumeBulletRead`
+  - reject success → `204 No Content`
+  - cross-user or missing bullet → `404`
+
+**Consequences:**  
+- Bullet mutations now follow the same ownership posture as the rest of the
+  API: callers cannot distinguish "missing" from "belongs to someone else."  
+- The service logic stays simple because referential cleanup is delegated to the
+  existing database/model cascade on `EvidenceLink`.  
+- Future bullet mutations should reuse the same resume-scoped ownership lookup
+  instead of querying `ResumeBullet` by ID alone.

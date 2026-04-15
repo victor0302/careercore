@@ -145,13 +145,25 @@ class ResumeService:
 
     async def approve_bullet(
         self, user_id: uuid.UUID, resume_id: uuid.UUID, bullet_id: uuid.UUID
-    ) -> ResumeBullet:
-        """Mark a resume bullet as approved by the user.
+    ) -> ResumeBullet | None:
+        """Mark a resume bullet as approved by the user."""
+        bullet = await self._get_bullet_for_user(user_id, resume_id, bullet_id)
+        if bullet is None:
+            return None
 
-        TODO: Validate ownership (resume belongs to user, bullet belongs to resume).
-        Set is_approved=True and flush.
-        """
-        raise NotImplementedError("Phase 1 — TODO: implement approve_bullet")
+        bullet.is_approved = True
+        await self._db.flush()
+        return bullet
+
+    async def reject_bullet(self, user_id: uuid.UUID, resume_id: uuid.UUID, bullet_id: uuid.UUID) -> bool:
+        """Delete a resume bullet owned by the user."""
+        bullet = await self._get_bullet_for_user(user_id, resume_id, bullet_id)
+        if bullet is None:
+            return False
+
+        await self._db.delete(bullet)
+        await self._db.flush()
+        return True
 
     async def snapshot_version(self, resume_id: uuid.UUID, fit_score: float | None) -> ResumeVersion:
         """Save a version snapshot of the current approved bullets.
@@ -160,6 +172,20 @@ class ResumeService:
         In Phase 2, also serialize the full bullet list into the version row.
         """
         raise NotImplementedError("Phase 1 — TODO: implement snapshot_version")
+
+    async def _get_bullet_for_user(
+        self, user_id: uuid.UUID, resume_id: uuid.UUID, bullet_id: uuid.UUID
+    ) -> ResumeBullet | None:
+        result = await self._db.execute(
+            select(ResumeBullet)
+            .join(Resume, Resume.id == ResumeBullet.resume_id)
+            .where(
+                ResumeBullet.id == bullet_id,
+                ResumeBullet.resume_id == resume_id,
+                Resume.user_id == user_id,
+            )
+        )
+        return result.scalar_one_or_none()
 
     async def _get_profile(self, user_id: uuid.UUID) -> Profile:
         result = await self._db.execute(select(Profile).where(Profile.user_id == user_id))
