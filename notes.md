@@ -2872,3 +2872,86 @@ Also, if you extend supported file types, update all three parts together:
 
 Changing only one of those layers creates exactly the kind of drift this ticket
 was meant to close.
+
+### 12.31 Issue #20 — Add integration tests for the signed URL endpoint
+
+This ticket did not change the signed-download implementation itself. The
+service layer was already correct: ownership enforcement lived in
+`FileService.get_download_url_for_user()`, the response schema exposed only a
+single `url` field, and the presigned TTL came from config. What was missing
+was the HTTP-layer contract test that proves the endpoint behaves that way when
+called through FastAPI with real auth.
+
+What changed:
+- added `backend/tests/integration/api/test_files.py`
+- followed the same login pattern used by other integration tests:
+  - create/use the test user fixture
+  - authenticate via `POST /api/v1/auth/login`
+  - call `GET /api/v1/files/{file_id}/url` with the bearer token
+- seeded `UploadedFile` rows directly in the database instead of exercising the
+  upload flow
+- monkeypatched `FileService.get_presigned_url()` so no boto3/MinIO call is
+  made during the endpoint tests
+- covered the four issue acceptance criteria:
+  - owner gets `200` with `{"url": "..."}`
+  - response body does not leak `storage_key`
+  - cross-user access returns `404`
+  - missing file ID returns `404`
+  - the returned URL path uses the configured short TTL
+
+Why test this at the HTTP layer if the service tests already existed?
+
+Because the endpoint contract is not identical to the service contract.
+
+The service tests prove ownership filtering and URL generation behavior. They do
+not prove that:
+- auth wiring works correctly through FastAPI dependencies
+- the endpoint maps `None` to the right `404`
+- the response body only exposes the public `url` field and not implementation
+  details like `storage_key`
+
+For a file-download endpoint, those transport-level guarantees matter just as
+much as the underlying service logic.
+
+Why insert `UploadedFile` rows directly instead of going through `POST /files`?
+
+Because this issue is about the download contract, not upload infrastructure.
+
+Using the upload flow here would drag object storage, upload validation, and
+queueing behavior into a test whose only real purpose is to validate the signed
+URL endpoint. Seeding the file row directly keeps the test focused on the
+authorization and response contract that issue `#20` actually cares about.
+
+Why monkeypatch `get_presigned_url()` instead of letting boto3 run?
+
+Because the HTTP contract does not need real object storage to be proven.
+
+The endpoint only needs to show that it:
+- finds the right owned row
+- refuses foreign or missing rows
+- returns the presigned URL string in the correct outward shape
+- uses the configured TTL when asking the service for the URL
+
+All of that can be verified with a fake presigned URL string. Pulling MinIO
+into this test would add infrastructure coupling without increasing confidence
+in the endpoint contract itself.
+
+Important tradeoff:
+
+These tests intentionally stop at the FastAPI/service seam. They do not prove
+that boto3 can talk to MinIO or that the generated URL is usable against a real
+bucket. That is a different class of test. The right split is:
+- endpoint contract tests here
+- object-storage integration tests elsewhere, if and when the project needs
+  them
+
+What future contributors should understand:
+
+If this endpoint ever starts exposing more than `{"url": ...}`, treat that as a
+public API contract change and update the tests deliberately. Do not casually
+leak `storage_key`, bucket names, or other internal storage identifiers just
+because the service has access to them.
+
+Also, if the TTL changes, update the config and keep the HTTP test asserting the
+configured value. The test should continue to prove "the endpoint uses config"
+rather than hard-coding infrastructure behavior in the route.
