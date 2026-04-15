@@ -28,6 +28,10 @@ class ResumeBulletRead(BaseModel):
     confidence: float | None
 
 
+class GenerateResumeBulletsResponse(BaseModel):
+    bullets: list[ResumeBulletRead]
+
+
 class ResumeBulletApprove(BaseModel):
     is_approved: bool
 

@@ -6,11 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.dependencies import get_ai_provider
+from app.ai.exceptions import BudgetExceededError
 from app.ai.provider import AIProvider
 from app.core.dependencies import get_current_user
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.resume import ResumeCreate, ResumeRead
+from app.schemas.resume import GenerateResumeBulletsResponse, ResumeBulletRead, ResumeCreate, ResumeRead
 from app.services.resume_service import ResumeService
 
 router = APIRouter()
@@ -56,12 +57,38 @@ async def get_resume(
     return ResumeRead.model_validate(resume)
 
 
-@router.post("/{resume_id}/bullets/generate")
+@router.post(
+    "/{resume_id}/bullets/generate",
+    response_model=GenerateResumeBulletsResponse,
+)
 async def generate_bullets(
     resume_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     ai: AIProvider = Depends(get_ai_provider),
-) -> dict:  # type: ignore[type-arg]
-    """Generate AI resume bullets for a resume. TODO: implement in Phase 1."""
-    return {"status": "not implemented", "message": "Phase 1 — implement generate_bullets"}
+) -> GenerateResumeBulletsResponse:
+    """Generate AI resume bullets for a resume."""
+    service = ResumeService(db, ai)
+    try:
+        bullets = await service.generate_bullets(current_user, resume_id)
+    except BudgetExceededError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                "message": "Daily AI token budget exceeded.",
+                "reset_at": exc.reset_at.isoformat(),
+            },
+        ) from exc
+    except ValueError as exc:
+        detail = str(exc)
+        not_found_messages = {"Resume not found."}
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if detail in not_found_messages
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+    return GenerateResumeBulletsResponse(
+        bullets=[ResumeBulletRead.model_validate(bullet) for bullet in bullets]
+    )
