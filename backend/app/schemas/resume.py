@@ -1,5 +1,6 @@
 """Pydantic schemas for Resume endpoints."""
 
+from datetime import datetime
 import uuid
 
 from pydantic import BaseModel, ConfigDict
@@ -32,9 +33,14 @@ class ResumeBulletApprove(BaseModel):
     is_approved: bool
 
 
+class ResumeVersionCreate(BaseModel):
+    fit_score: float | None = None
+
+
 class ResumeVersionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
     resume_id: uuid.UUID
     fit_score_at_gen: float | None
+    created_at: datetime

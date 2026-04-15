@@ -10,7 +10,7 @@ from app.ai.provider import AIProvider
 from app.core.dependencies import get_current_user
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.resume import ResumeCreate, ResumeRead
+from app.schemas.resume import ResumeCreate, ResumeRead, ResumeVersionCreate, ResumeVersionRead
 from app.services.resume_service import ResumeService
 
 router = APIRouter()
@@ -65,3 +65,31 @@ async def generate_bullets(
 ) -> dict:  # type: ignore[type-arg]
     """Generate AI resume bullets for a resume. TODO: implement in Phase 1."""
     return {"status": "not implemented", "message": "Phase 1 — implement generate_bullets"}
+
+
+@router.post(
+    "/{resume_id}/versions",
+    response_model=ResumeVersionRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def snapshot_resume_version(
+    resume_id: uuid.UUID,
+    data: ResumeVersionCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    ai: AIProvider = Depends(get_ai_provider),
+) -> ResumeVersionRead:
+    """Create a lightweight version checkpoint for a resume."""
+    service = ResumeService(db, ai)
+    try:
+        version = await service.snapshot_version(current_user.id, resume_id, data.fit_score)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    if version is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found.")
+
+    return ResumeVersionRead.model_validate(version)
