@@ -3,6 +3,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.dependencies import get_ai_provider
@@ -10,7 +11,7 @@ from app.ai.provider import AIProvider
 from app.core.dependencies import get_current_user
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.resume import ResumeCreate, ResumeRead
+from app.schemas.resume import ResumeBulletRead, ResumeCreate, ResumeRead
 from app.services.resume_service import ResumeService
 
 router = APIRouter()
@@ -65,3 +66,35 @@ async def generate_bullets(
 ) -> dict:  # type: ignore[type-arg]
     """Generate AI resume bullets for a resume. TODO: implement in Phase 1."""
     return {"status": "not implemented", "message": "Phase 1 — implement generate_bullets"}
+
+
+@router.patch("/{resume_id}/bullets/{bullet_id}/approve", response_model=ResumeBulletRead)
+async def approve_bullet(
+    resume_id: uuid.UUID,
+    bullet_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    ai: AIProvider = Depends(get_ai_provider),
+) -> ResumeBulletRead:
+    """Approve an AI-generated resume bullet."""
+    service = ResumeService(db, ai)
+    bullet = await service.approve_bullet(current_user.id, resume_id, bullet_id)
+    if bullet is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bullet not found.")
+    return ResumeBulletRead.model_validate(bullet)
+
+
+@router.delete("/{resume_id}/bullets/{bullet_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def reject_bullet(
+    resume_id: uuid.UUID,
+    bullet_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    ai: AIProvider = Depends(get_ai_provider),
+) -> Response:
+    """Reject and delete an AI-generated resume bullet."""
+    service = ResumeService(db, ai)
+    deleted = await service.reject_bullet(current_user.id, resume_id, bullet_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bullet not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
