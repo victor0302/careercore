@@ -2872,3 +2872,93 @@ Also, if you extend supported file types, update all three parts together:
 
 Changing only one of those layers creates exactly the kind of drift this ticket
 was meant to close.
+
+### 12.31 Issue #29 — Implement resume bullet approve and reject endpoints
+
+This ticket adds the first user-facing lifecycle step after bullet generation:
+users can now approve a generated bullet or reject it entirely. The important
+constraint is that a bullet is not owned directly by a user. It belongs to a
+resume, and the resume belongs to a user, so every mutation here has to enforce
+ownership through the resume boundary.
+
+What changed:
+- implemented `ResumeService.approve_bullet(...)`
+- added `ResumeService.reject_bullet(...)`
+- both methods use the same ownership-scoped lookup:
+  - `ResumeBullet.id == bullet_id`
+  - `ResumeBullet.resume_id == resume_id`
+  - joined through `Resume` with `Resume.user_id == user_id`
+- approval now:
+  - sets `is_approved=True`
+  - flushes
+  - returns the updated `ResumeBullet`
+- rejection now:
+  - deletes the `ResumeBullet` row
+  - flushes
+  - returns `True/False` for found vs not found
+- added two HTTP routes:
+  - `PATCH /api/v1/resumes/{resume_id}/bullets/{bullet_id}/approve`
+  - `DELETE /api/v1/resumes/{resume_id}/bullets/{bullet_id}`
+- added integration coverage in
+  `backend/tests/integration/api/test_resumes_bullets.py` for:
+  - approve success
+  - approve cross-user `404`
+  - reject success with DB deletion
+  - reject cross-user `404`
+
+Why scope the lookup by both `resume_id` and `bullet_id` instead of querying
+the bullet directly by ID?
+
+Because ownership is attached to the resume, not the bullet in isolation.
+
+If the service looked up `ResumeBullet` by `bullet_id` alone and then tried to
+reason about ownership afterward, it would make it too easy to accidentally
+turn bullet existence into an observable cross-user side channel. Joining
+through `Resume` in the query makes the ownership boundary part of the lookup
+itself, which is the right shape for this API.
+
+Why return `404` instead of `403` for cross-user bullet mutations?
+
+Because the rest of the ownership-safe patterns in this codebase already treat
+"missing" and "belongs to someone else" the same way when the resource is being
+looked up by a concrete identifier.
+
+That avoids confirming that another user's bullet exists. For an entity like a
+resume bullet, which is always nested under a parent resume, that is the safer
+default contract.
+
+Why delete the bullet on reject instead of adding another status flag?
+
+Because this issue's contract explicitly says reject deletes the bullet, and
+the existing schema already supports that shape cleanly.
+
+`EvidenceLink` rows are children of `ResumeBullet` and already use cascade
+delete. That means the service does not need to manually delete evidence rows
+one by one. The database/model relationship already expresses the right cleanup
+behavior.
+
+Important tradeoff:
+
+This ticket does not broaden into snapshot/version logic, bulk approval, or
+restore/undo behavior. Reject is a hard delete of the bullet row. If product
+requirements later need a recoverable rejection state, that should be modeled as
+a new explicit workflow, not inferred retroactively from the current delete
+contract.
+
+Testing note:
+
+The new integration module was added and the touched files compile cleanly. In
+this local environment, the single integration-file pytest invocation did not
+complete within a forced timeout, so the reliable verification path here was the
+targeted code review plus compile check rather than claiming a full green
+integration run that the environment did not actually produce.
+
+What future contributors should understand:
+
+If you add more bullet-level mutations, reuse the same ownership query shape.
+Do not query `ResumeBullet` by ID alone and then try to patch ownership in
+afterward. The join to `Resume` is the safety boundary.
+
+Also, if you ever change reject from delete to a soft state transition, revisit
+the `EvidenceLink` cleanup contract explicitly. Right now the cascade delete is
+correct because reject means the bullet row itself is gone.
