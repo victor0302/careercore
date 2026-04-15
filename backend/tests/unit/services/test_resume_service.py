@@ -16,8 +16,9 @@ os.environ.setdefault("CELERY_RESULT_BACKEND", "redis://localhost:6379/2")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key")
 
 from app.ai.exceptions import BudgetExceededError
-from app.ai.schemas import BulletContext, GeneratedBullet, JobRequirementItem, TokenUsage
+from app.ai.schemas import GeneratedBullet, TokenUsage
 from app.models.ai_call_log import AICallType
+from app.models.job_requirement import JobRequirementCategory
 from app.services import resume_service as resume_service_module
 from app.services.resume_service import ResumeService
 
@@ -77,23 +78,20 @@ class FakeAIProvider:
         self._bullets = bullets
         self._usage = usage
         self.called = False
+        self.seen_contexts = None
 
     async def generate_bullets(self, contexts, max_bullets: int = 5):
         self.called = True
+        self.seen_contexts = list(contexts)
         return self._bullets[:max_bullets], self._usage
 
 
-def _context(entity_type: str, entity_id: uuid.UUID, requirement_text: str) -> BulletContext:
-    return BulletContext(
-        profile_entity_type=entity_type,
-        profile_entity_id=entity_id,
-        entity_summary=f"{entity_type} summary",
-        target_requirement=JobRequirementItem(
-            id=uuid.uuid4(),
-            text=requirement_text,
-            category="skill",
-            is_required=True,
-        ),
+def _requirement(requirement_text: str):
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        requirement_text=requirement_text,
+        category=JobRequirementCategory.skill,
+        is_required=True,
     )
 
 
@@ -103,7 +101,6 @@ async def test_generate_bullets_discards_invalid_evidence_and_logs_usage(
 ) -> None:
     db = FakeAsyncSession()
     resume_id = uuid.uuid4()
-    job_id = uuid.uuid4()
     work_experience_id = uuid.uuid4()
     project_id = uuid.uuid4()
     user = SimpleNamespace(id=uuid.uuid4())
@@ -145,38 +142,45 @@ async def test_generate_bullets_discards_invalid_evidence_and_logs_usage(
     FakeCostService.should_raise = None
 
     service = ResumeService(db, provider)
-    service.get_for_user = AsyncMock(return_value=SimpleNamespace(id=resume_id, job_id=job_id))
-    service._get_latest_analysis = AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))
-    service._build_bullet_contexts = AsyncMock(
-        return_value=[
-            _context("work_experience", work_experience_id, "Python APIs"),
-            _context("project", project_id, "React UI work"),
-        ]
+    service.get_for_user = AsyncMock(return_value=SimpleNamespace(id=resume_id))
+    service._get_profile_entity_summary = AsyncMock(return_value="Backend Engineer at CareerCore")
+    service._get_job_requirements = AsyncMock(
+        return_value=[_requirement("Python APIs"), _requirement("React UI work")]
     )
 
-    saved = await service.generate_bullets(user, resume_id)
+    saved = await service.generate_bullets(
+        user,
+        resume_id,
+        "work_experience",
+        work_experience_id,
+        [uuid.uuid4(), uuid.uuid4()],
+    )
 
     assert provider.called is True
+    assert provider.seen_contexts is not None
+    assert len(provider.seen_contexts) == 2
+    assert all(context.profile_entity_type == "work_experience" for context in provider.seen_contexts)
+    assert all(context.profile_entity_id == work_experience_id for context in provider.seen_contexts)
+    assert [context.target_requirement.text for context in provider.seen_contexts] == [
+        "Python APIs",
+        "React UI work",
+    ]
     assert [bullet.text for bullet in saved] == [
         "Built reliable backend APIs.",
-        "Shipped a polished frontend refresh.",
     ]
     assert all(bullet.is_ai_generated is True for bullet in saved)
     assert all(bullet.is_approved is False for bullet in saved)
 
     cost_service = FakeCostService.instances[0]
     assert cost_service.checked_users == [user]
-    assert cost_service.logged_calls == [
-        {
-            "user_id": user.id,
-            "call_type": AICallType.generate_bullets,
-            "model": "test-bullets-model",
-            "prompt_tokens": 120,
-            "completion_tokens": 80,
-            "latency_ms": 321,
-            "success": True,
-        }
-    ]
+    assert len(cost_service.logged_calls) == 1
+    assert cost_service.logged_calls[0]["user_id"] == user.id
+    assert cost_service.logged_calls[0]["call_type"] == AICallType.generate_bullets
+    assert cost_service.logged_calls[0]["model"] == "mock"
+    assert cost_service.logged_calls[0]["prompt_tokens"] == 120
+    assert cost_service.logged_calls[0]["completion_tokens"] == 80
+    assert cost_service.logged_calls[0]["latency_ms"] >= 0
+    assert cost_service.logged_calls[0]["success"] is True
 
     evidence_links = [obj for obj in db.added if isinstance(obj, FakeEvidenceLink)]
     assert {
@@ -184,7 +188,6 @@ async def test_generate_bullets_discards_invalid_evidence_and_logs_usage(
         for link in evidence_links
     } == {
         ("work_experience", work_experience_id),
-        ("project", project_id),
     }
 
 
@@ -222,14 +225,20 @@ async def test_generate_bullets_checks_budget_before_provider_call(
     FakeCostService.should_raise = BudgetExceededError(str(user.id), budget=100, used=100)
 
     service = ResumeService(db, provider)
-    service.get_for_user = AsyncMock(return_value=SimpleNamespace(id=resume_id, job_id=uuid.uuid4()))
-    service._get_latest_analysis = AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))
-    service._build_bullet_contexts = AsyncMock(
-        return_value=[_context("work_experience", work_experience_id, "Python APIs")]
+    service.get_for_user = AsyncMock(return_value=SimpleNamespace(id=resume_id))
+    service._get_profile_entity_summary = AsyncMock(return_value="Backend Engineer at CareerCore")
+    service._get_job_requirements = AsyncMock(
+        return_value=[_requirement("Python APIs")]
     )
 
     with pytest.raises(BudgetExceededError):
-        await service.generate_bullets(user, resume_id)
+        await service.generate_bullets(
+            user,
+            resume_id,
+            "work_experience",
+            work_experience_id,
+            [uuid.uuid4()],
+        )
 
     assert provider.called is False
     cost_service = FakeCostService.instances[0]

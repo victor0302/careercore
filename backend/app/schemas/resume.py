@@ -1,6 +1,7 @@
 """Pydantic schemas for Resume endpoints."""
 
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -28,8 +29,10 @@ class ResumeBulletRead(BaseModel):
     confidence: float | None
 
 
-class GenerateResumeBulletsResponse(BaseModel):
-    bullets: list[ResumeBulletRead]
+class BulletsGenerateRequest(BaseModel):
+    profile_entity_type: Literal["work_experience", "project"]
+    profile_entity_id: uuid.UUID
+    requirement_ids: list[uuid.UUID]
 
 
 class ResumeBulletApprove(BaseModel):
