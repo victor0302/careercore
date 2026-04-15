@@ -888,3 +888,45 @@ behavior should be.
 - If richer extraction telemetry is needed later, it should be introduced as an
   explicit new model/migration, not smuggled into the worker as undocumented
   side storage.
+
+---
+
+## ADR-035 — Resume version snapshots are checkpoint rows gated by approved bullets
+
+**Date:** 2026-04-15 (issue #30)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#30` introduced the first resumable "save point" for resume generation.
+The model already existed: `ResumeVersion` stores a `resume_id` and an optional
+`fit_score_at_gen`, and the ticket explicitly scoped Phase 1 as a lightweight
+checkpoint rather than a full denormalized history system. The unresolved
+questions were what must be true before a snapshot is allowed, and what data
+belongs in the version row now versus later.
+
+**Decision:**  
+- A Phase 1 snapshot creates exactly one `ResumeVersion` row with:
+  - `resume_id`
+  - `fit_score_at_gen`
+  - standard timestamp fields from `TimestampMixin`
+- The endpoint/service must first enforce resume ownership through the existing
+  `get_for_user()` path. Cross-user or missing resumes return `404`.
+- Snapshot creation is gated by approved user content:
+  - count only `ResumeBullet` rows where `is_approved=True`
+  - if that count is zero, reject the request with `422 "No approved bullets to snapshot."`
+- Phase 1 does **not** serialize bullets into `ResumeVersion`. The approved
+  bullet check is a guard clause for meaningful checkpoints, not a signal to
+  denormalize the bullet list prematurely.
+- The API response contract includes `created_at` so clients can order and
+  display checkpoints without inferring version chronology indirectly.
+
+**Consequences:**  
+- Resume snapshots are intentionally cheap to create and easy to reason about:
+  one row equals one checkpoint.  
+- Users cannot create empty or draft-only checkpoints, which keeps the version
+  history tied to reviewed content rather than transient generation artifacts.  
+- The current schema stays aligned with the ticket scope; Phase 2 can add full
+  bullet serialization as an explicit evolution instead of overloading the
+  Phase 1 row shape.  
+- Clients now have a stable timestamp to show “saved version” history without
+  needing to query or compare bullets to reconstruct when a checkpoint happened.

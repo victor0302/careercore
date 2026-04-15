@@ -2872,3 +2872,74 @@ Also, if you extend supported file types, update all three parts together:
 
 Changing only one of those layers creates exactly the kind of drift this ticket
 was meant to close.
+
+### 12.31 Issue #30 — Implement the resume version snapshot endpoint and service method
+
+This ticket deliberately kept resume versioning small.
+
+`ResumeVersion` already existed, but the service method and endpoint were still
+stubs. The issue did not call for a full "save the whole resume state" feature.
+It called for a lightweight checkpoint that records fit score at save time and
+only allows the checkpoint when the resume has at least one approved bullet.
+
+What changed:
+- added `ResumeVersionCreate` for the request body and extended
+  `ResumeVersionRead` to expose `created_at`
+- implemented `ResumeService.snapshot_version(user_id, resume_id, fit_score)`
+- the service now:
+  - enforces resume ownership through `get_for_user()`
+  - counts only approved bullets on that resume
+  - raises `ValueError("No approved bullets to snapshot.")` when the approved
+    bullet count is zero
+  - creates and flushes a `ResumeVersion` row with `fit_score_at_gen`
+- added `POST /api/v1/resumes/{resume_id}/versions`
+  - `201` with the new version payload on success
+  - `422` for resumes with no approved bullets
+  - `404` for missing or cross-user resumes
+- added unit coverage for:
+  - snapshot row creation
+  - zero-bullet rejection
+  - unapproved-only rejection
+  - non-owned resume access
+- added integration coverage for the HTTP contract, including `created_at` in
+  the success payload
+
+Why gate snapshots on approved bullets?
+
+Because a snapshot should represent something the user has actually accepted,
+not just temporary AI output or an empty draft shell.
+
+If Phase 1 allowed snapshots with zero approved bullets, the version history
+would quickly fill with meaningless checkpoints that say nothing about the
+resume content. The guard clause keeps the history useful without forcing us to
+build a heavier versioned-bullet storage model yet.
+
+Why not serialize bullets into `ResumeVersion` now?
+
+Because the issue explicitly scoped that out.
+
+The note about Phase 2 is important: it signals a future design direction, not
+an instruction to partially denormalize content early. For this ticket, the
+right move was to make the existing `ResumeVersion` row useful and honest
+without pretending we already have full historical replay.
+
+Real implementation/testing issue:
+
+This branch was created from the current `main` state in a dedicated worktree
+because the shared `/home/vic/careercore` checkout was already active on a
+different issue branch. That kept this ticket isolated and avoided mixing
+snapshot work into unrelated PR state.
+
+The focused unit coverage is the reliable verification path here. The new
+integration test module was added alongside the endpoint, but whether it runs
+cleanly depends on the broader app test bootstrap in the local environment.
+
+What future contributors should understand:
+
+Phase 1 resume versions are checkpoints, not archives. If you need “restore the
+exact bullet set from version X,” that is a different feature and should be
+implemented explicitly with new persisted data, not inferred from this row.
+
+Also, do not weaken the approved-bullet guard just to make testing or demo
+flows easier. If you need draft checkpoints later, that is a product decision
+and should show up as a deliberate contract change.
