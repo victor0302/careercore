@@ -2873,7 +2873,187 @@ Also, if you extend supported file types, update all three parts together:
 Changing only one of those layers creates exactly the kind of drift this ticket
 was meant to close.
 
-### 12.31 Issue #29 — Implement resume bullet approve and reject endpoints
+### 12.30 Issue #28 — Implement request-driven resume bullet generation with evidence validation
+
+This ticket replaced the placeholder `POST /resumes/{id}/bullets/generate`
+stub with the actual Phase 1 service flow. The key point is that the endpoint
+is request-driven, not analysis-driven: the client names one profile entity and
+the job-requirement IDs it wants to target, and the service turns that request
+into `BulletContext` rows for the provider.
+
+What changed:
+- added `BulletsGenerateRequest` to the resume schemas:
+  - `profile_entity_type`
+  - `profile_entity_id`
+  - `requirement_ids`
+- updated the endpoint to accept that request body and return
+  `list[ResumeBulletRead]`
+- implemented `ResumeService.generate_bullets(...)` with the exact service flow
+  the issue called for:
+  - verify resume ownership
+  - resolve the selected profile entity through the authenticated user's
+    profile
+  - load `JobRequirement` rows by the supplied IDs
+  - run `AICostService.check_budget(user)` before the AI call
+  - build one `BulletContext` per requirement using a minimal entity summary
+  - call `self._ai.generate_bullets(contexts)`
+  - discard any generated bullet whose `evidence_entity_id` does not match the
+    requested profile entity
+  - persist `ResumeBullet` rows with:
+    - `is_ai_generated=True`
+    - `is_approved=False`
+  - persist `EvidenceLink` rows for accepted bullets
+  - log the AI call via `AICostService.log_call(...)`
+- measured actual provider-call latency with `time.monotonic()` and wrote that
+  to the AI call log
+
+Why let the request specify the profile entity and requirement IDs directly?
+
+Because that is the contract this issue asked for.
+
+The endpoint is not trying to infer generation scope from prior scoring state.
+It is an explicit generation request: “use this profile entity against these job
+requirements.” That keeps the API surface simple and makes the source of bullet
+context obvious to the caller.
+
+Why still validate evidence after the provider call?
+
+Because the provider may propose candidate bullets, but it does not define what
+is safe to persist.
+
+Even in a request-driven endpoint, the service must enforce that saved bullets
+point back to the entity the caller actually selected. If the provider returns
+an `evidence_entity_id` that does not match the generated contexts, the bullet
+is discarded. That keeps the persisted evidence graph coherent and prevents the
+database from storing model output that references unrelated entities.
+
+Why is the entity summary intentionally minimal?
+
+Because this issue specified the exact summary contract:
+- work experience → `"{role_title} at {employer}"`
+- project → `"{name}"`
+
+That is narrower than the earlier analysis-derived version, which tried to fold
+in description and extracted tags. The implementation here stays with the
+issue’s explicit scope rather than expanding the prompt surface on its own.
+
+Important edge behavior:
+
+- missing resume ownership returns a not-found path from the service/endpoint
+- missing work experience or project row for the authenticated user's profile
+  fails fast
+- an empty `requirement_ids` list produces an empty context list and therefore
+  no saved bullets
+- budget is checked before any provider call
+- invalid evidence IDs are filtered out before any `ResumeBullet` or
+  `EvidenceLink` row is written
+
+Testing approach:
+
+The focused unit tests stay on `ResumeService` rather than the full app stack.
+That gives a clean signal on the service contract without broadening the ticket
+into unrelated integration-harness problems. The tests verify:
+- budget exceeded propagates before any provider call
+- invalid evidence IDs are discarded
+- saved bullets are AI-generated and unapproved
+- `EvidenceLink` rows are created
+- AI call logging records token counts
+
+What future contributors should understand:
+
+If you expand this endpoint to more entity types, update all three layers
+together:
+- request schema validation
+- entity lookup / summary construction
+- post-generation evidence validation
+
+Changing only the prompt-building side without updating validation is how you
+end up persisting bullets that point at evidence the service never authorized.
+
+### 12.31 Issue #20 — Add integration tests for the signed URL endpoint
+
+This ticket did not change the signed-download implementation itself. The
+service layer was already correct: ownership enforcement lived in
+`FileService.get_download_url_for_user()`, the response schema exposed only a
+single `url` field, and the presigned TTL came from config. What was missing
+was the HTTP-layer contract test that proves the endpoint behaves that way when
+called through FastAPI with real auth.
+
+What changed:
+- added `backend/tests/integration/api/test_files.py`
+- followed the same login pattern used by other integration tests:
+  - create/use the test user fixture
+  - authenticate via `POST /api/v1/auth/login`
+  - call `GET /api/v1/files/{file_id}/url` with the bearer token
+- seeded `UploadedFile` rows directly in the database instead of exercising the
+  upload flow
+- monkeypatched `FileService.get_presigned_url()` so no boto3/MinIO call is
+  made during the endpoint tests
+- covered the four issue acceptance criteria:
+  - owner gets `200` with `{"url": "..."}`
+  - response body does not leak `storage_key`
+  - cross-user access returns `404`
+  - missing file ID returns `404`
+  - the returned URL path uses the configured short TTL
+
+Why test this at the HTTP layer if the service tests already existed?
+
+Because the endpoint contract is not identical to the service contract.
+
+The service tests prove ownership filtering and URL generation behavior. They do
+not prove that:
+- auth wiring works correctly through FastAPI dependencies
+- the endpoint maps `None` to the right `404`
+- the response body only exposes the public `url` field and not implementation
+  details like `storage_key`
+
+For a file-download endpoint, those transport-level guarantees matter just as
+much as the underlying service logic.
+
+Why insert `UploadedFile` rows directly instead of going through `POST /files`?
+
+Because this issue is about the download contract, not upload infrastructure.
+
+Using the upload flow here would drag object storage, upload validation, and
+queueing behavior into a test whose only real purpose is to validate the signed
+URL endpoint. Seeding the file row directly keeps the test focused on the
+authorization and response contract that issue `#20` actually cares about.
+
+Why monkeypatch `get_presigned_url()` instead of letting boto3 run?
+
+Because the HTTP contract does not need real object storage to be proven.
+
+The endpoint only needs to show that it:
+- finds the right owned row
+- refuses foreign or missing rows
+- returns the presigned URL string in the correct outward shape
+- uses the configured TTL when asking the service for the URL
+
+All of that can be verified with a fake presigned URL string. Pulling MinIO
+into this test would add infrastructure coupling without increasing confidence
+in the endpoint contract itself.
+
+Important tradeoff:
+
+These tests intentionally stop at the FastAPI/service seam. They do not prove
+that boto3 can talk to MinIO or that the generated URL is usable against a real
+bucket. That is a different class of test. The right split is:
+- endpoint contract tests here
+- object-storage integration tests elsewhere, if and when the project needs
+  them
+
+What future contributors should understand:
+
+If this endpoint ever starts exposing more than `{"url": ...}`, treat that as a
+public API contract change and update the tests deliberately. Do not casually
+leak `storage_key`, bucket names, or other internal storage identifiers just
+because the service has access to them.
+
+Also, if the TTL changes, update the config and keep the HTTP test asserting the
+configured value. The test should continue to prove "the endpoint uses config"
+rather than hard-coding infrastructure behavior in the route.
+
+### 12.32 Issue #29 — Implement resume bullet approve and reject endpoints
 
 This ticket adds the first user-facing lifecycle step after bullet generation:
 users can now approve a generated bullet or reject it entirely. The important
