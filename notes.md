@@ -2872,3 +2872,84 @@ Also, if you extend supported file types, update all three parts together:
 
 Changing only one of those layers creates exactly the kind of drift this ticket
 was meant to close.
+
+### 12.30 Issue #28 — Resume bullet generation now validates evidence against matched analysis context
+
+This ticket replaced the placeholder `POST /resumes/{id}/bullets/generate`
+stub with the actual Phase 1 service flow. The important design constraint was
+that bullet generation is not a free-form “pick any profile entity and ask the
+LLM to write something” endpoint. It is downstream of scoring, so it needs to
+stay tied to the same evidence graph the scoring system already established.
+
+What changed:
+- the endpoint now calls a real `ResumeService.generate_bullets(...)` flow
+  instead of returning a placeholder payload
+- generation context is derived from the resume's linked job and the user's
+  latest `JobAnalysis` for that job
+- only matched entities currently supported by the provider contract
+  (`work_experience` and `project`) are transformed into `BulletContext`
+- the service now checks `AICostService.check_budget(...)` before invoking the
+  provider and logs token usage/cost metadata after a successful provider call
+- provider output is filtered before persistence: a bullet is saved only if its
+  evidence pointer matches one of the allowed matched-analysis entities
+- saved bullets are persisted as:
+  - `is_ai_generated=True`
+  - `is_approved=False`
+- evidence links are written alongside each accepted bullet so later approval
+  and versioning work can rely on the persisted source references
+
+Why validate evidence after the provider call instead of trusting the model?
+
+Because the model is allowed to propose candidates, not define truth.
+
+The matched analysis rows are the authoritative set of profile entities that
+already proved relevant to the target job. If the provider returns a bullet
+pointing at some other entity ID, or at a mismatched entity type, persisting
+that output would silently break the product's trust model. The correct place
+to enforce that contract is the service layer, after generation and before any
+database writes.
+
+Why derive generation context from `JobAnalysis` instead of taking profile IDs
+from the request body?
+
+Because the endpoint should not let callers widen scope past what the scoring
+pipeline already matched.
+
+If the client could submit arbitrary profile entity IDs here, the resume
+generator would no longer be anchored to “evidence that matched this job.” It
+would become a second parallel selection mechanism with weaker guarantees and a
+much easier path to cross-layer drift. Tying it to the latest owned analysis
+keeps generation, evidence validation, and fit scoring aligned.
+
+Important edge behavior:
+
+- if the resume is not linked to a job, generation fails fast
+- if there is no owned analysis for the resume's job yet, generation fails fast
+- if there are no supported matched entities after analysis filtering, the
+  service returns an empty list and does not spend tokens on a provider call
+- if the provider returns a mix of valid and invalid evidence references, only
+  the valid subset is saved
+
+Testing approach:
+
+The clean signal for this ticket came from focused unit coverage on
+`ResumeService`, not from the shared integration harness. The integration path
+currently bootstraps the full model set against SQLite, and unrelated
+PostgreSQL-only `JSONB` columns in profile models make that harness fail before
+resume-generation logic even runs. Rather than widening this issue into test
+infrastructure repair, the tests here validate the ticket contract directly:
+- budget is checked before the provider call
+- invalid evidence is discarded
+- accepted bullets stay unapproved by default
+- AI-call logging uses the provider's returned token usage
+
+What future contributors should understand:
+
+If you extend bullet generation to more entity types, add them in two places at
+the same time:
+- context construction from matched analysis rows
+- post-generation evidence validation before persistence
+
+Do not add a new entity type only to the prompt/context side and forget the
+validation side. That would reintroduce a trust gap where model output can
+reference evidence the service never authorized.

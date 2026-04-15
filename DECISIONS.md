@@ -888,3 +888,43 @@ behavior should be.
 - If richer extraction telemetry is needed later, it should be introduced as an
   explicit new model/migration, not smuggled into the worker as undocumented
   side storage.
+
+---
+
+## ADR-035 — Generated resume bullets must be backed by matched analysis evidence
+
+**Date:** 2026-04-15 (issue #28)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#28` replaced the placeholder resume bullet generator with the real
+Phase 1 flow. The central design question was whether the generation endpoint
+should accept arbitrary profile entities from the caller or derive its context
+from the existing `JobAnalysis` evidence graph. That matters because resume
+generation is only trustworthy if every saved bullet can be traced back to
+profile data that already matched the target job.
+
+**Decision:**  
+- `POST /resumes/{id}/bullets/generate` derives generation context from the
+  resume's linked job and the user's latest `JobAnalysis` for that job.  
+- Only matched analysis entities currently supported by the provider contract
+  (`work_experience` and `project`) are converted into `BulletContext` inputs.  
+- The service checks the user's daily AI budget before calling the provider and
+  logs provider token usage through `AICostService`.  
+- Provider output is treated as advisory, not authoritative: a generated bullet
+  is persisted only if its `(evidence_entity_type, evidence_entity_id)` pair
+  matches one of the allowed entities from the derived analysis context.  
+- Saved bullets are always persisted as AI-generated and unapproved by default;
+  approval/snapshot flows remain separate later-stage actions.
+
+**Consequences:**  
+- Resume generation stays anchored to the same evidence graph used by scoring
+  instead of letting clients smuggle in unrelated profile entities.  
+- Hallucinated or drifted evidence references from the provider are discarded
+  rather than persisted and shown to users as if they were verified.  
+- The provider contract remains simple: it returns candidate bullets and their
+  evidence pointers, while the service layer owns validation, persistence, and
+  ownership enforcement.  
+- If future work expands evidence-backed generation to other entity types
+  (skills, certifications, etc.), that expansion should begin by extending the
+  matched-analysis context and service validation, not by bypassing them.
