@@ -3,6 +3,7 @@
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.provider import AIProvider
@@ -43,6 +44,32 @@ class ResumeService:
             )
         )
         return result.scalar_one_or_none()
+
+    async def list_versions_for_user(
+        self,
+        user_id: uuid.UUID,
+        skip: int = 0,
+        limit: int = 20,
+    ) -> list[tuple[ResumeVersion, str | None, str | None]]:
+        """Return a user's resume versions with linked job title/company, newest first."""
+        result = await self._db.execute(
+            select(ResumeVersion)
+            .join(Resume, ResumeVersion.resume_id == Resume.id)
+            .where(Resume.user_id == user_id)
+            .options(joinedload(ResumeVersion.resume).joinedload(Resume.job))
+            .order_by(ResumeVersion.created_at.desc())
+            .offset(skip)
+            .limit(limit)
+        )
+        versions = list(result.scalars().unique().all())
+        return [
+            (
+                version,
+                version.resume.job.title if version.resume and version.resume.job else None,
+                version.resume.job.company if version.resume and version.resume.job else None,
+            )
+            for version in versions
+        ]
 
     async def generate_bullets(
         self,
