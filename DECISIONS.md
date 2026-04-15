@@ -888,3 +888,49 @@ behavior should be.
 - If richer extraction telemetry is needed later, it should be introduced as an
   explicit new model/migration, not smuggled into the worker as undocumented
   side storage.
+
+---
+
+## ADR-035 — Resume version listing is user-scoped and enriches versions with linked job metadata
+
+**Date:** 2026-04-15 (issue #31)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#31` added the first read API for resume version history. `ResumeVersion`
+rows belong to `Resume`, and `Resume` may optionally belong to a
+`JobDescription`. The product requirement was not just "list raw versions"; the
+client needs each list item to include the save timestamp plus the linked job's
+title and company when available. The main design question was where to resolve
+that enrichment and how broad the list scope should be.
+
+**Decision:**  
+- Version history is exposed as a top-level user-scoped list endpoint:
+  `GET /api/v1/resumes/versions`  
+- The endpoint returns version rows across **all** resumes owned by the
+  authenticated user, not just one resume at a time.  
+- Ownership is enforced through `Resume.user_id == current_user.id`. Versions
+  for any other user's resumes are omitted entirely.  
+- The service joins from `ResumeVersion -> Resume` and eager-loads the optional
+  `Resume.job` relationship so each list item can include:
+  - `id`
+  - `resume_id`
+  - `fit_score_at_gen`
+  - `created_at`
+  - `job_title`
+  - `job_company`
+- Pagination uses `skip`/`limit` query params with `limit` defaulting to `20`
+  and capped at `100`, matching the project's existing API style.  
+- Job metadata is treated as presentation data for the list item, not new
+  persisted columns on `ResumeVersion`.
+
+**Consequences:**  
+- Clients can render a unified “saved versions” history without issuing
+  secondary requests per resume to recover job context.  
+- Version listing stays ownership-safe because the filter is applied at the
+  resume join point, which is the actual parent object users own.  
+- Resumes without a linked job still participate in history; their `job_title`
+  and `job_company` are simply `null`.  
+- The version row schema remains normalized. If richer denormalized history is
+  needed later, it should be introduced deliberately instead of smuggling job
+  snapshots into the current model.
