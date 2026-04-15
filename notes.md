@@ -2873,83 +2873,99 @@ Also, if you extend supported file types, update all three parts together:
 Changing only one of those layers creates exactly the kind of drift this ticket
 was meant to close.
 
-### 12.30 Issue #28 — Resume bullet generation now validates evidence against matched analysis context
+### 12.30 Issue #28 — Implement request-driven resume bullet generation with evidence validation
 
 This ticket replaced the placeholder `POST /resumes/{id}/bullets/generate`
-stub with the actual Phase 1 service flow. The important design constraint was
-that bullet generation is not a free-form “pick any profile entity and ask the
-LLM to write something” endpoint. It is downstream of scoring, so it needs to
-stay tied to the same evidence graph the scoring system already established.
+stub with the actual Phase 1 service flow. The key point is that the endpoint
+is request-driven, not analysis-driven: the client names one profile entity and
+the job-requirement IDs it wants to target, and the service turns that request
+into `BulletContext` rows for the provider.
 
 What changed:
-- the endpoint now calls a real `ResumeService.generate_bullets(...)` flow
-  instead of returning a placeholder payload
-- generation context is derived from the resume's linked job and the user's
-  latest `JobAnalysis` for that job
-- only matched entities currently supported by the provider contract
-  (`work_experience` and `project`) are transformed into `BulletContext`
-- the service now checks `AICostService.check_budget(...)` before invoking the
-  provider and logs token usage/cost metadata after a successful provider call
-- provider output is filtered before persistence: a bullet is saved only if its
-  evidence pointer matches one of the allowed matched-analysis entities
-- saved bullets are persisted as:
-  - `is_ai_generated=True`
-  - `is_approved=False`
-- evidence links are written alongside each accepted bullet so later approval
-  and versioning work can rely on the persisted source references
+- added `BulletsGenerateRequest` to the resume schemas:
+  - `profile_entity_type`
+  - `profile_entity_id`
+  - `requirement_ids`
+- updated the endpoint to accept that request body and return
+  `list[ResumeBulletRead]`
+- implemented `ResumeService.generate_bullets(...)` with the exact service flow
+  the issue called for:
+  - verify resume ownership
+  - resolve the selected profile entity through the authenticated user's
+    profile
+  - load `JobRequirement` rows by the supplied IDs
+  - run `AICostService.check_budget(user)` before the AI call
+  - build one `BulletContext` per requirement using a minimal entity summary
+  - call `self._ai.generate_bullets(contexts)`
+  - discard any generated bullet whose `evidence_entity_id` does not match the
+    requested profile entity
+  - persist `ResumeBullet` rows with:
+    - `is_ai_generated=True`
+    - `is_approved=False`
+  - persist `EvidenceLink` rows for accepted bullets
+  - log the AI call via `AICostService.log_call(...)`
+- measured actual provider-call latency with `time.monotonic()` and wrote that
+  to the AI call log
 
-Why validate evidence after the provider call instead of trusting the model?
+Why let the request specify the profile entity and requirement IDs directly?
 
-Because the model is allowed to propose candidates, not define truth.
+Because that is the contract this issue asked for.
 
-The matched analysis rows are the authoritative set of profile entities that
-already proved relevant to the target job. If the provider returns a bullet
-pointing at some other entity ID, or at a mismatched entity type, persisting
-that output would silently break the product's trust model. The correct place
-to enforce that contract is the service layer, after generation and before any
-database writes.
+The endpoint is not trying to infer generation scope from prior scoring state.
+It is an explicit generation request: “use this profile entity against these job
+requirements.” That keeps the API surface simple and makes the source of bullet
+context obvious to the caller.
 
-Why derive generation context from `JobAnalysis` instead of taking profile IDs
-from the request body?
+Why still validate evidence after the provider call?
 
-Because the endpoint should not let callers widen scope past what the scoring
-pipeline already matched.
+Because the provider may propose candidate bullets, but it does not define what
+is safe to persist.
 
-If the client could submit arbitrary profile entity IDs here, the resume
-generator would no longer be anchored to “evidence that matched this job.” It
-would become a second parallel selection mechanism with weaker guarantees and a
-much easier path to cross-layer drift. Tying it to the latest owned analysis
-keeps generation, evidence validation, and fit scoring aligned.
+Even in a request-driven endpoint, the service must enforce that saved bullets
+point back to the entity the caller actually selected. If the provider returns
+an `evidence_entity_id` that does not match the generated contexts, the bullet
+is discarded. That keeps the persisted evidence graph coherent and prevents the
+database from storing model output that references unrelated entities.
+
+Why is the entity summary intentionally minimal?
+
+Because this issue specified the exact summary contract:
+- work experience → `"{role_title} at {employer}"`
+- project → `"{name}"`
+
+That is narrower than the earlier analysis-derived version, which tried to fold
+in description and extracted tags. The implementation here stays with the
+issue’s explicit scope rather than expanding the prompt surface on its own.
 
 Important edge behavior:
 
-- if the resume is not linked to a job, generation fails fast
-- if there is no owned analysis for the resume's job yet, generation fails fast
-- if there are no supported matched entities after analysis filtering, the
-  service returns an empty list and does not spend tokens on a provider call
-- if the provider returns a mix of valid and invalid evidence references, only
-  the valid subset is saved
+- missing resume ownership returns a not-found path from the service/endpoint
+- missing work experience or project row for the authenticated user's profile
+  fails fast
+- an empty `requirement_ids` list produces an empty context list and therefore
+  no saved bullets
+- budget is checked before any provider call
+- invalid evidence IDs are filtered out before any `ResumeBullet` or
+  `EvidenceLink` row is written
 
 Testing approach:
 
-The clean signal for this ticket came from focused unit coverage on
-`ResumeService`, not from the shared integration harness. The integration path
-currently bootstraps the full model set against SQLite, and unrelated
-PostgreSQL-only `JSONB` columns in profile models make that harness fail before
-resume-generation logic even runs. Rather than widening this issue into test
-infrastructure repair, the tests here validate the ticket contract directly:
-- budget is checked before the provider call
-- invalid evidence is discarded
-- accepted bullets stay unapproved by default
-- AI-call logging uses the provider's returned token usage
+The focused unit tests stay on `ResumeService` rather than the full app stack.
+That gives a clean signal on the service contract without broadening the ticket
+into unrelated integration-harness problems. The tests verify:
+- budget exceeded propagates before any provider call
+- invalid evidence IDs are discarded
+- saved bullets are AI-generated and unapproved
+- `EvidenceLink` rows are created
+- AI call logging records token counts
 
 What future contributors should understand:
 
-If you extend bullet generation to more entity types, add them in two places at
-the same time:
-- context construction from matched analysis rows
-- post-generation evidence validation before persistence
+If you expand this endpoint to more entity types, update all three layers
+together:
+- request schema validation
+- entity lookup / summary construction
+- post-generation evidence validation
 
-Do not add a new entity type only to the prompt/context side and forget the
-validation side. That would reintroduce a trust gap where model output can
-reference evidence the service never authorized.
+Changing only the prompt-building side without updating validation is how you
+end up persisting bullets that point at evidence the service never authorized.
