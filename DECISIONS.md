@@ -942,3 +942,41 @@ output must still be checked before it is written to the database.
 - If future work expands generation to other entity types, that work should add
   both request validation and post-generation evidence validation for the new
   type, not just prompt construction.
+
+---
+
+## ADR-036 — Signed download endpoint integration tests validate only the HTTP contract, not object storage
+
+**Date:** 2026-04-15 (issue #20)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#20` already had the implementation and service-layer tests: ownership
+is enforced in `FileService.get_download_url_for_user()`, the response schema
+exposes only `url`, and the download TTL is config-driven. What was missing was
+HTTP-layer coverage for `GET /api/v1/files/{file_id}/url`. The design question
+was how to test the endpoint without turning a file URL contract test into an
+integration test for MinIO or boto3.
+
+**Decision:**  
+- Integration tests for the signed download endpoint seed `UploadedFile` rows
+  directly in the database instead of going through the upload flow.  
+- The HTTP tests monkeypatch `FileService.get_presigned_url()` so the endpoint
+  contract is verified without calling boto3 or requiring MinIO.  
+- The acceptance criteria at the HTTP layer are:
+  - owner gets `200` with `{"url": "..."}` only
+  - cross-user access returns `404`
+  - non-existent file IDs return `404`
+  - the generated URL path uses the configured short TTL
+- Internal fields like `storage_key` remain an implementation detail and are
+  explicitly excluded from the response contract.
+
+**Consequences:**  
+- The file download endpoint now has parity with other entity endpoints: there
+  is a real HTTP integration test module, not just service-level coverage.  
+- Endpoint tests stay fast and deterministic because they verify authorization,
+  status codes, response shape, and TTL plumbing without depending on object
+  storage infrastructure.  
+- If MinIO or boto3 integration needs to be tested later, that should be added
+  as a separate infrastructure-level test path instead of bloating the endpoint
+  contract tests.
