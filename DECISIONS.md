@@ -888,3 +888,57 @@ behavior should be.
 - If richer extraction telemetry is needed later, it should be introduced as an
   explicit new model/migration, not smuggled into the worker as undocumented
   side storage.
+
+---
+
+## ADR-035 — Resume bullet generation is request-driven but evidence-validated before persistence
+
+**Date:** 2026-04-15 (issue #28)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#28` replaced the placeholder resume bullet generator with the real
+Phase 1 flow. The implementation question was where the generation context
+should come from and how much of the provider output could be trusted. The
+issue contract explicitly chose a request-driven shape:
+
+- the caller names one profile entity (`work_experience` or `project`)
+- the caller supplies the target `JobRequirement` IDs
+- the service builds one `BulletContext` per requested requirement
+
+That makes the API flexible, but it also creates a trust boundary: provider
+output must still be checked before it is written to the database.
+
+**Decision:**  
+- `POST /resumes/{id}/bullets/generate` accepts a request body containing
+  `profile_entity_type`, `profile_entity_id`, and `requirement_ids`.  
+- Resume ownership is enforced first. The selected profile entity is then
+  resolved through the authenticated user's `Profile`, so callers cannot target
+  another user's work experience or project row.  
+- The service loads `JobRequirement` rows by the provided IDs and converts each
+  one into a `BulletContext` using a minimal entity summary:
+  - work experience → `"{role_title} at {employer}"`
+  - project → `"{name}"`  
+- The service checks the user's daily AI budget before calling the provider and
+  logs provider token usage through `AICostService`.  
+- Provider output is treated as advisory, not authoritative: a generated bullet
+  is persisted only if its `evidence_entity_id` matches the requested profile
+  entity ID from the generated contexts. Invalid evidence references are
+  discarded instead of saved.  
+- Saved bullets are always persisted as AI-generated and unapproved by default;
+  approval/snapshot flows remain separate later-stage actions.
+
+**Consequences:**  
+- The API contract is now explicit and request-driven rather than inferred from
+  prior job-analysis state. That keeps the endpoint focused on bullet
+  generation, not analysis lookup.  
+- Ownership still holds at the service layer because entity lookup is scoped
+  through the authenticated user's profile before any provider call is made.  
+- Hallucinated or drifted evidence references from the provider are discarded
+  rather than persisted and shown to users as if they were verified.  
+- The provider contract remains simple: it returns candidate bullets and their
+  evidence pointers, while the service layer owns validation, persistence, and
+  ownership enforcement.  
+- If future work expands generation to other entity types, that work should add
+  both request validation and post-generation evidence validation for the new
+  type, not just prompt construction.
