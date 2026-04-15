@@ -888,3 +888,49 @@ behavior should be.
 - If richer extraction telemetry is needed later, it should be introduced as an
   explicit new model/migration, not smuggled into the worker as undocumented
   side storage.
+
+---
+
+## ADR-035 — Resume version detail resolves current approved bullets and evidence display metadata
+
+**Date:** 2026-04-15 (issue #32)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#32` added the detail view for a saved resume version. In Phase 1,
+`ResumeVersion` does not persist its own frozen bullet set or evidence snapshot.
+The product still needs a useful detail page now, which means the API must show
+the version row plus the currently approved bullets on the parent resume and
+human-readable evidence names. The design question was whether to fake a
+historical archive shape now or expose the current approved state honestly.
+
+**Decision:**  
+- `GET /api/v1/resumes/versions/{version_id}` returns:
+  - the `ResumeVersion` identifiers and saved fit score
+  - linked job title/company when the parent resume has a job
+  - the parent resume's **currently approved** bullets
+  - each bullet's resolved evidence metadata
+- Ownership is enforced through the parent resume:
+  - load `ResumeVersion`
+  - join/load its `Resume`
+  - return `404` unless `Resume.user_id == current_user.id`
+- Evidence resolution is done at read time:
+  - `work_experience` -> `"role_title at employer"`
+  - `project` -> `name`
+  - missing referenced entities fall back to `"Unknown"`
+- Only `ResumeBullet.is_approved=True` rows appear in version detail. Draft or
+  rejected bullets are excluded even if they belong to the same resume.
+- Phase 1 does **not** pretend this is immutable version history. The endpoint
+  deliberately exposes current approved bullets until a later phase adds real
+  persisted snapshot content.
+
+**Consequences:**  
+- The version detail endpoint is useful immediately without introducing a
+  premature denormalized archive model.  
+- Consumers get readable evidence labels instead of raw foreign UUIDs only,
+  which makes the detail view understandable to humans.  
+- The response is honest about current system behavior: it is a checkpoint row
+  plus the resume's current approved state, not a guaranteed historical replay.  
+- When immutable version playback is added later, it should be introduced as an
+  explicit contract change rather than silently changing the meaning of this
+  Phase 1 endpoint.
