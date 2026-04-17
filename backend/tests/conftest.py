@@ -34,6 +34,7 @@ from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
 
 from app.ai.providers.mock_provider import MockAIProvider  # noqa: E402
+from app.core.rate_limit import _get_redis  # noqa: E402
 from app.db.base import Base  # noqa: E402
 from app.db.session import get_db  # noqa: E402
 from app.main import app  # noqa: E402
@@ -72,18 +73,48 @@ async def db(test_engine) -> AsyncGenerator[AsyncSession, None]:  # type: ignore
 
 @pytest_asyncio.fixture
 async def client(db: AsyncSession) -> AsyncGenerator[AsyncClient, None]:  # type: ignore[type-arg]
-    """Async HTTP client with DB and AI provider overridden."""
+    """Async HTTP client with DB, AI provider, and Redis overridden.
+
+    Redis is replaced with a no-op sentinel so tests never connect to a real
+    Redis instance.  Rate-limit counter logic is monkeypatched separately in
+    tests/integration/api/test_auth_rate_limit.py; for all other tests the
+    rate limiter is effectively disabled because _increment_counter returns 1
+    (below the 10-request limit) by default when the counter store is empty.
+    """
+    import app.core.rate_limit as rl_module
+    from collections import defaultdict
+
     mock_ai = MockAIProvider()
 
     app.dependency_overrides[get_db] = lambda: db  # type: ignore[assignment]
+    # Return a sentinel None so _get_redis never creates a real aioredis client.
+    app.dependency_overrides[_get_redis] = lambda: None  # type: ignore[assignment]
 
     from app.ai.dependencies import get_ai_provider
 
     app.dependency_overrides[get_ai_provider] = lambda: mock_ai  # type: ignore[assignment]
 
+    # Replace Redis counter helpers with in-memory stubs so no real Redis call
+    # is made from the RateLimiter dependency during non-rate-limit tests.
+    _counts: dict[str, int] = defaultdict(int)
+
+    async def _stub_increment(redis, key: str, window_seconds: int) -> int:
+        _counts[key] += 1
+        return _counts[key]
+
+    async def _stub_ttl(redis, key: str) -> int:
+        return 900
+
+    original_incr = rl_module._increment_counter
+    original_ttl = rl_module._get_ttl
+    rl_module._increment_counter = _stub_increment  # type: ignore[assignment]
+    rl_module._get_ttl = _stub_ttl  # type: ignore[assignment]
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
 
+    rl_module._increment_counter = original_incr  # type: ignore[assignment]
+    rl_module._get_ttl = original_ttl  # type: ignore[assignment]
     app.dependency_overrides.clear()
 
 
