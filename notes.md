@@ -3142,3 +3142,79 @@ afterward. The join to `Resume` is the safety boundary.
 Also, if you ever change reject from delete to a soft state transition, revisit
 the `EvidenceLink` cleanup contract explicitly. Right now the cascade delete is
 correct because reject means the bullet row itself is gone.
+
+### 12.33 Issue #32 — Implement resume version detail with resolved evidence metadata
+
+This ticket added the read model for an individual resume version.
+
+The important constraint is that Phase 1 resume versions are not full archives.
+`ResumeVersion` stores checkpoint metadata, not a serialized bullet set. That
+means the detail endpoint cannot honestly claim to return "the exact historical
+version contents." What it can return, and what this issue asked for, is the
+version row plus the current approved bullets on the parent resume with
+evidence rendered into human-readable names.
+
+What changed:
+- added response schemas for:
+  - `EvidenceLinkRead`
+  - `ResumeBulletWithEvidence`
+  - `ResumeVersionDetailRead`
+- implemented `ResumeService.get_version_detail(user_id, version_id)`
+- the service now:
+  - loads the version with its parent resume and optional linked job
+  - enforces ownership through `version.resume.user_id`
+  - loads only approved bullets for that resume
+  - loads each bullet's `evidence_links`
+  - resolves evidence display names as:
+    - work experience -> `"{role_title} at {employer}"`
+    - project -> `name`
+  - falls back to `"Unknown"` if a referenced entity is missing
+- added `GET /api/v1/resumes/versions/{version_id}`
+  - returns `404 "Version not found."` for missing or cross-user access
+- added integration coverage for:
+  - successful evidence resolution
+  - cross-user `404`
+  - approved-only bullet inclusion
+  - null job metadata when the resume has no linked job
+
+Why return current approved bullets instead of trying to reconstruct a frozen
+historical version?
+
+Because Phase 1 does not store enough data to do that honestly.
+
+A `ResumeVersion` row currently captures checkpoint metadata (like fit score)
+but not a denormalized bullet/evidence snapshot. Reconstructing an immutable
+historical payload from that would be guesswork and could mislead clients. This
+endpoint therefore returns a precise, explicit contract: the saved version row
+plus the parent resume's currently approved bullets.
+
+Why resolve display names in the backend?
+
+Because the API already owns the meaning of evidence entity types.
+
+If the client only received raw `source_entity_type` and `source_entity_id`, it
+would need to duplicate lookup rules for work experience versus project and
+issue extra requests to render basic labels. That is backend join/projection
+work, not client business logic.
+
+Real implementation/testing issue:
+
+As with other resume-version endpoints, the `/resumes/versions/{version_id}`
+route has to appear before `/{resume_id}` in the router. Otherwise FastAPI will
+parse the literal `"versions"` segment as a resume UUID path parameter and the
+detail route becomes unreachable.
+
+The integration file was added directly for this endpoint contract, but whether
+it runs end-to-end locally still depends on the broader app-level test bootstrap
+in this environment.
+
+What future contributors should understand:
+
+If a stakeholder later asks, "why doesn't this endpoint show the exact bullets
+from the moment I saved the version?", the answer is: because Phase 1 never
+persisted that snapshot. Fixing that requires new stored data, not a smaller
+query tweak.
+
+Also, do not broaden evidence resolution into arbitrary entity types without
+updating both the resolver and the contract docs. Right now the supported set is
+explicitly `work_experience` and `project`.
