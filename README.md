@@ -5,7 +5,7 @@ build evidence-backed resumes, score job fit with explainable reasoning, and clo
 with personalized recommendations.
 
 > **Status:** Phase 1 — Core infrastructure and scoring engine  
-> **Capstone:** MSU Denver Senior CS Project
+> **Capstone:** 
 
 ---
 
