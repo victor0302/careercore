@@ -2873,73 +2873,426 @@ Also, if you extend supported file types, update all three parts together:
 Changing only one of those layers creates exactly the kind of drift this ticket
 was meant to close.
 
-### 12.31 Issue #30 — Implement the resume version snapshot endpoint and service method
+### 12.30 Issue #28 — Implement request-driven resume bullet generation with evidence validation
 
-This ticket deliberately kept resume versioning small.
-
-`ResumeVersion` already existed, but the service method and endpoint were still
-stubs. The issue did not call for a full "save the whole resume state" feature.
-It called for a lightweight checkpoint that records fit score at save time and
-only allows the checkpoint when the resume has at least one approved bullet.
+This ticket replaced the placeholder `POST /resumes/{id}/bullets/generate`
+stub with the actual Phase 1 service flow. The key point is that the endpoint
+is request-driven, not analysis-driven: the client names one profile entity and
+the job-requirement IDs it wants to target, and the service turns that request
+into `BulletContext` rows for the provider.
 
 What changed:
-- added `ResumeVersionCreate` for the request body and extended
-  `ResumeVersionRead` to expose `created_at`
-- implemented `ResumeService.snapshot_version(user_id, resume_id, fit_score)`
-- the service now:
-  - enforces resume ownership through `get_for_user()`
-  - counts only approved bullets on that resume
-  - raises `ValueError("No approved bullets to snapshot.")` when the approved
-    bullet count is zero
-  - creates and flushes a `ResumeVersion` row with `fit_score_at_gen`
-- added `POST /api/v1/resumes/{resume_id}/versions`
-  - `201` with the new version payload on success
-  - `422` for resumes with no approved bullets
-  - `404` for missing or cross-user resumes
-- added unit coverage for:
-  - snapshot row creation
-  - zero-bullet rejection
-  - unapproved-only rejection
-  - non-owned resume access
-- added integration coverage for the HTTP contract, including `created_at` in
-  the success payload
+- added `BulletsGenerateRequest` to the resume schemas:
+  - `profile_entity_type`
+  - `profile_entity_id`
+  - `requirement_ids`
+- updated the endpoint to accept that request body and return
+  `list[ResumeBulletRead]`
+- implemented `ResumeService.generate_bullets(...)` with the exact service flow
+  the issue called for:
+  - verify resume ownership
+  - resolve the selected profile entity through the authenticated user's
+    profile
+  - load `JobRequirement` rows by the supplied IDs
+  - run `AICostService.check_budget(user)` before the AI call
+  - build one `BulletContext` per requirement using a minimal entity summary
+  - call `self._ai.generate_bullets(contexts)`
+  - discard any generated bullet whose `evidence_entity_id` does not match the
+    requested profile entity
+  - persist `ResumeBullet` rows with:
+    - `is_ai_generated=True`
+    - `is_approved=False`
+  - persist `EvidenceLink` rows for accepted bullets
+  - log the AI call via `AICostService.log_call(...)`
+- measured actual provider-call latency with `time.monotonic()` and wrote that
+  to the AI call log
 
-Why gate snapshots on approved bullets?
+Why let the request specify the profile entity and requirement IDs directly?
 
-Because a snapshot should represent something the user has actually accepted,
-not just temporary AI output or an empty draft shell.
+Because that is the contract this issue asked for.
 
-If Phase 1 allowed snapshots with zero approved bullets, the version history
-would quickly fill with meaningless checkpoints that say nothing about the
-resume content. The guard clause keeps the history useful without forcing us to
-build a heavier versioned-bullet storage model yet.
+The endpoint is not trying to infer generation scope from prior scoring state.
+It is an explicit generation request: “use this profile entity against these job
+requirements.” That keeps the API surface simple and makes the source of bullet
+context obvious to the caller.
 
-Why not serialize bullets into `ResumeVersion` now?
+Why still validate evidence after the provider call?
 
-Because the issue explicitly scoped that out.
+Because the provider may propose candidate bullets, but it does not define what
+is safe to persist.
 
-The note about Phase 2 is important: it signals a future design direction, not
-an instruction to partially denormalize content early. For this ticket, the
-right move was to make the existing `ResumeVersion` row useful and honest
-without pretending we already have full historical replay.
+Even in a request-driven endpoint, the service must enforce that saved bullets
+point back to the entity the caller actually selected. If the provider returns
+an `evidence_entity_id` that does not match the generated contexts, the bullet
+is discarded. That keeps the persisted evidence graph coherent and prevents the
+database from storing model output that references unrelated entities.
 
-Real implementation/testing issue:
+Why is the entity summary intentionally minimal?
 
-This branch was created from the current `main` state in a dedicated worktree
-because the shared `/home/vic/careercore` checkout was already active on a
-different issue branch. That kept this ticket isolated and avoided mixing
-snapshot work into unrelated PR state.
+Because this issue specified the exact summary contract:
+- work experience → `"{role_title} at {employer}"`
+- project → `"{name}"`
 
-The focused unit coverage is the reliable verification path here. The new
-integration test module was added alongside the endpoint, but whether it runs
-cleanly depends on the broader app test bootstrap in the local environment.
+That is narrower than the earlier analysis-derived version, which tried to fold
+in description and extracted tags. The implementation here stays with the
+issue’s explicit scope rather than expanding the prompt surface on its own.
+
+Important edge behavior:
+
+- missing resume ownership returns a not-found path from the service/endpoint
+- missing work experience or project row for the authenticated user's profile
+  fails fast
+- an empty `requirement_ids` list produces an empty context list and therefore
+  no saved bullets
+- budget is checked before any provider call
+- invalid evidence IDs are filtered out before any `ResumeBullet` or
+  `EvidenceLink` row is written
+
+Testing approach:
+
+The focused unit tests stay on `ResumeService` rather than the full app stack.
+That gives a clean signal on the service contract without broadening the ticket
+into unrelated integration-harness problems. The tests verify:
+- budget exceeded propagates before any provider call
+- invalid evidence IDs are discarded
+- saved bullets are AI-generated and unapproved
+- `EvidenceLink` rows are created
+- AI call logging records token counts
 
 What future contributors should understand:
 
-Phase 1 resume versions are checkpoints, not archives. If you need “restore the
-exact bullet set from version X,” that is a different feature and should be
-implemented explicitly with new persisted data, not inferred from this row.
+If you expand this endpoint to more entity types, update all three layers
+together:
+- request schema validation
+- entity lookup / summary construction
+- post-generation evidence validation
 
-Also, do not weaken the approved-bullet guard just to make testing or demo
-flows easier. If you need draft checkpoints later, that is a product decision
-and should show up as a deliberate contract change.
+Changing only the prompt-building side without updating validation is how you
+end up persisting bullets that point at evidence the service never authorized.
+
+### 12.31 Issue #20 — Add integration tests for the signed URL endpoint
+
+This ticket did not change the signed-download implementation itself. The
+service layer was already correct: ownership enforcement lived in
+`FileService.get_download_url_for_user()`, the response schema exposed only a
+single `url` field, and the presigned TTL came from config. What was missing
+was the HTTP-layer contract test that proves the endpoint behaves that way when
+called through FastAPI with real auth.
+
+What changed:
+- added `backend/tests/integration/api/test_files.py`
+- followed the same login pattern used by other integration tests:
+  - create/use the test user fixture
+  - authenticate via `POST /api/v1/auth/login`
+  - call `GET /api/v1/files/{file_id}/url` with the bearer token
+- seeded `UploadedFile` rows directly in the database instead of exercising the
+  upload flow
+- monkeypatched `FileService.get_presigned_url()` so no boto3/MinIO call is
+  made during the endpoint tests
+- covered the four issue acceptance criteria:
+  - owner gets `200` with `{"url": "..."}`
+  - response body does not leak `storage_key`
+  - cross-user access returns `404`
+  - missing file ID returns `404`
+  - the returned URL path uses the configured short TTL
+
+Why test this at the HTTP layer if the service tests already existed?
+
+Because the endpoint contract is not identical to the service contract.
+
+The service tests prove ownership filtering and URL generation behavior. They do
+not prove that:
+- auth wiring works correctly through FastAPI dependencies
+- the endpoint maps `None` to the right `404`
+- the response body only exposes the public `url` field and not implementation
+  details like `storage_key`
+
+For a file-download endpoint, those transport-level guarantees matter just as
+much as the underlying service logic.
+
+Why insert `UploadedFile` rows directly instead of going through `POST /files`?
+
+Because this issue is about the download contract, not upload infrastructure.
+
+Using the upload flow here would drag object storage, upload validation, and
+queueing behavior into a test whose only real purpose is to validate the signed
+URL endpoint. Seeding the file row directly keeps the test focused on the
+authorization and response contract that issue `#20` actually cares about.
+
+Why monkeypatch `get_presigned_url()` instead of letting boto3 run?
+
+Because the HTTP contract does not need real object storage to be proven.
+
+The endpoint only needs to show that it:
+- finds the right owned row
+- refuses foreign or missing rows
+- returns the presigned URL string in the correct outward shape
+- uses the configured TTL when asking the service for the URL
+
+All of that can be verified with a fake presigned URL string. Pulling MinIO
+into this test would add infrastructure coupling without increasing confidence
+in the endpoint contract itself.
+
+Important tradeoff:
+
+These tests intentionally stop at the FastAPI/service seam. They do not prove
+that boto3 can talk to MinIO or that the generated URL is usable against a real
+bucket. That is a different class of test. The right split is:
+- endpoint contract tests here
+- object-storage integration tests elsewhere, if and when the project needs
+  them
+
+What future contributors should understand:
+
+If this endpoint ever starts exposing more than `{"url": ...}`, treat that as a
+public API contract change and update the tests deliberately. Do not casually
+leak `storage_key`, bucket names, or other internal storage identifiers just
+because the service has access to them.
+
+Also, if the TTL changes, update the config and keep the HTTP test asserting the
+configured value. The test should continue to prove "the endpoint uses config"
+rather than hard-coding infrastructure behavior in the route.
+
+### 12.32 Issue #29 — Implement resume bullet approve and reject endpoints
+
+This ticket adds the first user-facing lifecycle step after bullet generation:
+users can now approve a generated bullet or reject it entirely. The important
+constraint is that a bullet is not owned directly by a user. It belongs to a
+resume, and the resume belongs to a user, so every mutation here has to enforce
+ownership through the resume boundary.
+
+What changed:
+- implemented `ResumeService.approve_bullet(...)`
+- added `ResumeService.reject_bullet(...)`
+- both methods use the same ownership-scoped lookup:
+  - `ResumeBullet.id == bullet_id`
+  - `ResumeBullet.resume_id == resume_id`
+  - joined through `Resume` with `Resume.user_id == user_id`
+- approval now:
+  - sets `is_approved=True`
+  - flushes
+  - returns the updated `ResumeBullet`
+- rejection now:
+  - deletes the `ResumeBullet` row
+  - flushes
+  - returns `True/False` for found vs not found
+- added two HTTP routes:
+  - `PATCH /api/v1/resumes/{resume_id}/bullets/{bullet_id}/approve`
+  - `DELETE /api/v1/resumes/{resume_id}/bullets/{bullet_id}`
+- added integration coverage in
+  `backend/tests/integration/api/test_resumes_bullets.py` for:
+  - approve success
+  - approve cross-user `404`
+  - reject success with DB deletion
+  - reject cross-user `404`
+
+Why scope the lookup by both `resume_id` and `bullet_id` instead of querying
+the bullet directly by ID?
+
+Because ownership is attached to the resume, not the bullet in isolation.
+
+If the service looked up `ResumeBullet` by `bullet_id` alone and then tried to
+reason about ownership afterward, it would make it too easy to accidentally
+turn bullet existence into an observable cross-user side channel. Joining
+through `Resume` in the query makes the ownership boundary part of the lookup
+itself, which is the right shape for this API.
+
+Why return `404` instead of `403` for cross-user bullet mutations?
+
+Because the rest of the ownership-safe patterns in this codebase already treat
+"missing" and "belongs to someone else" the same way when the resource is being
+looked up by a concrete identifier.
+
+That avoids confirming that another user's bullet exists. For an entity like a
+resume bullet, which is always nested under a parent resume, that is the safer
+default contract.
+
+Why delete the bullet on reject instead of adding another status flag?
+
+Because this issue's contract explicitly says reject deletes the bullet, and
+the existing schema already supports that shape cleanly.
+
+`EvidenceLink` rows are children of `ResumeBullet` and already use cascade
+delete. That means the service does not need to manually delete evidence rows
+one by one. The database/model relationship already expresses the right cleanup
+behavior.
+
+Important tradeoff:
+
+This ticket does not broaden into snapshot/version logic, bulk approval, or
+restore/undo behavior. Reject is a hard delete of the bullet row. If product
+requirements later need a recoverable rejection state, that should be modeled as
+a new explicit workflow, not inferred retroactively from the current delete
+contract.
+
+Testing note:
+
+The new integration module was added and the touched files compile cleanly. In
+this local environment, the single integration-file pytest invocation did not
+complete within a forced timeout, so the reliable verification path here was the
+targeted code review plus compile check rather than claiming a full green
+integration run that the environment did not actually produce.
+
+What future contributors should understand:
+
+If you add more bullet-level mutations, reuse the same ownership query shape.
+Do not query `ResumeBullet` by ID alone and then try to patch ownership in
+afterward. The join to `Resume` is the safety boundary.
+
+Also, if you ever change reject from delete to a soft state transition, revisit
+the `EvidenceLink` cleanup contract explicitly. Right now the cascade delete is
+correct because reject means the bullet row itself is gone.
+
+### 12.33 Issue #32 — Implement resume version detail with resolved evidence metadata
+
+This ticket added the read model for an individual resume version.
+
+The important constraint is that Phase 1 resume versions are not full archives.
+`ResumeVersion` stores checkpoint metadata, not a serialized bullet set. That
+means the detail endpoint cannot honestly claim to return "the exact historical
+version contents." What it can return, and what this issue asked for, is the
+version row plus the current approved bullets on the parent resume with
+evidence rendered into human-readable names.
+
+What changed:
+- added response schemas for:
+  - `EvidenceLinkRead`
+  - `ResumeBulletWithEvidence`
+  - `ResumeVersionDetailRead`
+- implemented `ResumeService.get_version_detail(user_id, version_id)`
+- the service now:
+  - loads the version with its parent resume and optional linked job
+  - enforces ownership through `version.resume.user_id`
+  - loads only approved bullets for that resume
+  - loads each bullet's `evidence_links`
+  - resolves evidence display names as:
+    - work experience -> `"{role_title} at {employer}"`
+    - project -> `name`
+  - falls back to `"Unknown"` if a referenced entity is missing
+- added `GET /api/v1/resumes/versions/{version_id}`
+  - returns `404 "Version not found."` for missing or cross-user access
+- added integration coverage for:
+  - successful evidence resolution
+  - cross-user `404`
+  - approved-only bullet inclusion
+  - null job metadata when the resume has no linked job
+
+Why return current approved bullets instead of trying to reconstruct a frozen
+historical version?
+
+Because Phase 1 does not store enough data to do that honestly.
+
+A `ResumeVersion` row currently captures checkpoint metadata (like fit score)
+but not a denormalized bullet/evidence snapshot. Reconstructing an immutable
+historical payload from that would be guesswork and could mislead clients. This
+endpoint therefore returns a precise, explicit contract: the saved version row
+plus the parent resume's currently approved bullets.
+
+Why resolve display names in the backend?
+
+Because the API already owns the meaning of evidence entity types.
+
+If the client only received raw `source_entity_type` and `source_entity_id`, it
+would need to duplicate lookup rules for work experience versus project and
+issue extra requests to render basic labels. That is backend join/projection
+work, not client business logic.
+
+Real implementation/testing issue:
+
+As with other resume-version endpoints, the `/resumes/versions/{version_id}`
+route has to appear before `/{resume_id}` in the router. Otherwise FastAPI will
+parse the literal `"versions"` segment as a resume UUID path parameter and the
+detail route becomes unreachable.
+
+The integration file was added directly for this endpoint contract, but whether
+it runs end-to-end locally still depends on the broader app-level test bootstrap
+in this environment.
+
+What future contributors should understand:
+
+If a stakeholder later asks, "why doesn't this endpoint show the exact bullets
+from the moment I saved the version?", the answer is: because Phase 1 never
+persisted that snapshot. Fixing that requires new stored data, not a smaller
+query tweak.
+
+Also, do not broaden evidence resolution into arbitrary entity types without
+updating both the resolver and the contract docs. Right now the supported set is
+explicitly `work_experience` and `project`.
+
+### 12.34 Issue #31 — Implement paginated resume version listing
+
+This ticket added the read side of resume version history.
+
+The important requirement was that versions should not come back as bare
+`ResumeVersion` rows. The frontend needs each saved version to carry enough
+context to render a usable history view, which means timestamp plus the linked
+job's title/company when the resume has a job attached.
+
+What changed:
+- added `ResumeVersionListItem` to represent the list response shape:
+  - version id
+  - `resume_id`
+  - `fit_score_at_gen`
+  - `created_at`
+  - `job_title`
+  - `job_company`
+- added `ResumeService.list_versions_for_user(user_id, skip, limit)`
+- the service now:
+  - joins `ResumeVersion` to `Resume`
+  - filters by `Resume.user_id == current_user.id`
+  - eager-loads the optional linked job
+  - orders newest-first by `ResumeVersion.created_at`
+  - applies `skip`/`limit` pagination
+- added `GET /api/v1/resumes/versions`
+  - returns a top-level list across all resumes for the authenticated user
+  - manually populates `job_title` and `job_company` from joined data
+- added integration coverage for:
+  - user-only visibility
+  - exclusion of another user's versions
+  - pagination with `skip=1&limit=1`
+  - list item fields including `created_at`, `job_title`, `job_company`, and
+    `fit_score_at_gen`
+  - empty-list behavior
+
+Why make this a top-level `/resumes/versions` endpoint instead of nesting under
+one resume?
+
+Because the use case here is version history.
+
+The client wants a single feed of saved checkpoints the user can browse. If the
+API required one request per resume, the consumer would have to first list
+resumes, then fan out into N more requests just to assemble what is logically a
+single history view. That would be slower and would push a simple join problem
+out of the backend and into every client.
+
+Why enrich with job title/company in the service response instead of adding
+those columns onto `ResumeVersion`?
+
+Because those values are display context, not version-owned data in this phase.
+
+The issue did not ask for a denormalized historical job snapshot. It asked for
+list items that can show the linked job context today. The correct shape is to
+join and project the data for the response while keeping the stored model
+unchanged.
+
+Real implementation/testing issue:
+
+The `/resumes/versions` route has to be registered before `/{resume_id}` in the
+router. If it is declared after the detail route, FastAPI treats the literal
+path segment `"versions"` as the `resume_id` parameter and the endpoint becomes
+unreachable.
+
+The integration file was added in the same style as the rest of the repo's API
+tests. Whether it runs cleanly locally still depends on the broader app test
+bootstrap in this environment, which has unrelated constraints on some
+branches.
+
+What future contributors should understand:
+
+Ownership for versions is not checked on `ResumeVersion` alone. The user owns
+the parent `Resume`, so version listing must continue to filter through that
+relationship.
+
+Also, if you later add per-resume version history endpoints, keep this
+cross-resume list. It serves a different product use case and should not be
+replaced by a narrower nested route.
