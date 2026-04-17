@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.dependencies import get_current_user
+from app.core.rate_limit import RateLimiter
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.user import (
@@ -18,6 +19,9 @@ from app.services.auth_service import AuthError, AuthService
 
 router = APIRouter()
 settings = get_settings()
+
+# 10 requests per 15-minute window — shared across register, login, and refresh.
+_auth_rate_limiter = RateLimiter(max_requests=10, window_seconds=900)
 
 
 def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
@@ -37,6 +41,7 @@ async def register(
     data: UserCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(_auth_rate_limiter),
 ) -> UserRead:
     """Register a new user account."""
     service = AuthService(db)
@@ -62,6 +67,7 @@ async def login(
     request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(_auth_rate_limiter),
 ) -> AccessTokenResponse:
     """Authenticate and return an access token while setting a refresh cookie."""
     service = AuthService(db)
@@ -92,6 +98,7 @@ async def refresh(
     request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(_auth_rate_limiter),
 ) -> AccessTokenResponse:
     """Exchange a refresh token for a new access token."""
     service = AuthService(db)

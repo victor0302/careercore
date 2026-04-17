@@ -38,7 +38,11 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         "Resume", back_populates="user", lazy="select"
     )
     ai_call_logs: Mapped[list["AICallLog"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
-        "AICallLog", back_populates="user", lazy="select"
+        "AICallLog",
+        back_populates="user",
+        lazy="select",
+        primaryjoin="User.id == foreign(AICallLog.user_id)",
+        viewonly=True,
     )
     uploaded_files: Mapped[list["UploadedFile"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "UploadedFile", back_populates="user", lazy="select"
