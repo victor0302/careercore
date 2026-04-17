@@ -74,9 +74,14 @@ class ResumeVersionDetailRead(BaseModel):
     bullets: list[ResumeBulletWithEvidence]
 
 
+class ResumeVersionCreate(BaseModel):
+    fit_score: float | None = None
+
+
 class ResumeVersionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
     resume_id: uuid.UUID
     fit_score_at_gen: float | None
+    created_at: datetime

@@ -17,6 +17,8 @@ from app.schemas.resume import (
     ResumeBulletRead,
     ResumeCreate,
     ResumeRead,
+    ResumeVersionCreate,
+    ResumeVersionRead,
     ResumeVersionListItem,
     ResumeVersionDetailRead,
 )
@@ -102,6 +104,34 @@ async def get_resume(
     if resume is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found.")
     return ResumeRead.model_validate(resume)
+
+
+@router.post(
+    "/{resume_id}/versions",
+    response_model=ResumeVersionRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def snapshot_resume_version(
+    resume_id: uuid.UUID,
+    data: ResumeVersionCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    ai: AIProvider = Depends(get_ai_provider),
+) -> ResumeVersionRead:
+    """Create a lightweight version checkpoint for a resume."""
+    service = ResumeService(db, ai)
+    try:
+        version = await service.snapshot_version(current_user.id, resume_id, data.fit_score)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    if version is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found.")
+
+    return ResumeVersionRead.model_validate(version)
 
 
 @router.post("/{resume_id}/bullets/generate", response_model=list[ResumeBulletRead])

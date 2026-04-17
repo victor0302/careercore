@@ -3,7 +3,7 @@
 import time
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -264,13 +264,34 @@ class ResumeService:
         await self._db.flush()
         return True
 
-    async def snapshot_version(self, resume_id: uuid.UUID, fit_score: float | None) -> ResumeVersion:
+    async def snapshot_version(
+        self, user_id: uuid.UUID, resume_id: uuid.UUID, fit_score: float | None
+    ) -> ResumeVersion | None:
         """Save a version snapshot of the current approved bullets.
 
         TODO: Create a ResumeVersion row with the current fit_score_at_gen.
         In Phase 2, also serialize the full bullet list into the version row.
         """
-        raise NotImplementedError("Phase 1 — TODO: implement snapshot_version")
+        resume = await self.get_for_user(user_id, resume_id)
+        if resume is None:
+            return None
+
+        result = await self._db.execute(
+            select(func.count())
+            .select_from(ResumeBullet)
+            .where(
+                ResumeBullet.resume_id == resume_id,
+                ResumeBullet.is_approved.is_(True),
+            )
+        )
+        approved_count = result.scalar_one()
+        if approved_count == 0:
+            raise ValueError("No approved bullets to snapshot.")
+
+        version = ResumeVersion(resume_id=resume_id, fit_score_at_gen=fit_score)
+        self._db.add(version)
+        await self._db.flush()
+        return version
 
     async def _get_bullet_for_user(
         self, user_id: uuid.UUID, resume_id: uuid.UUID, bullet_id: uuid.UUID
