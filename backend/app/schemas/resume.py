@@ -40,6 +40,17 @@ class ResumeBulletApprove(BaseModel):
     is_approved: bool
 
 
+class ResumeVersionListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    resume_id: uuid.UUID
+    fit_score_at_gen: float | None
+    created_at: datetime
+    job_title: str | None
+    job_company: str | None
+
+
 class EvidenceLinkRead(BaseModel):
     source_entity_type: str
     source_entity_id: uuid.UUID

@@ -3218,3 +3218,81 @@ query tweak.
 Also, do not broaden evidence resolution into arbitrary entity types without
 updating both the resolver and the contract docs. Right now the supported set is
 explicitly `work_experience` and `project`.
+
+### 12.34 Issue #31 — Implement paginated resume version listing
+
+This ticket added the read side of resume version history.
+
+The important requirement was that versions should not come back as bare
+`ResumeVersion` rows. The frontend needs each saved version to carry enough
+context to render a usable history view, which means timestamp plus the linked
+job's title/company when the resume has a job attached.
+
+What changed:
+- added `ResumeVersionListItem` to represent the list response shape:
+  - version id
+  - `resume_id`
+  - `fit_score_at_gen`
+  - `created_at`
+  - `job_title`
+  - `job_company`
+- added `ResumeService.list_versions_for_user(user_id, skip, limit)`
+- the service now:
+  - joins `ResumeVersion` to `Resume`
+  - filters by `Resume.user_id == current_user.id`
+  - eager-loads the optional linked job
+  - orders newest-first by `ResumeVersion.created_at`
+  - applies `skip`/`limit` pagination
+- added `GET /api/v1/resumes/versions`
+  - returns a top-level list across all resumes for the authenticated user
+  - manually populates `job_title` and `job_company` from joined data
+- added integration coverage for:
+  - user-only visibility
+  - exclusion of another user's versions
+  - pagination with `skip=1&limit=1`
+  - list item fields including `created_at`, `job_title`, `job_company`, and
+    `fit_score_at_gen`
+  - empty-list behavior
+
+Why make this a top-level `/resumes/versions` endpoint instead of nesting under
+one resume?
+
+Because the use case here is version history.
+
+The client wants a single feed of saved checkpoints the user can browse. If the
+API required one request per resume, the consumer would have to first list
+resumes, then fan out into N more requests just to assemble what is logically a
+single history view. That would be slower and would push a simple join problem
+out of the backend and into every client.
+
+Why enrich with job title/company in the service response instead of adding
+those columns onto `ResumeVersion`?
+
+Because those values are display context, not version-owned data in this phase.
+
+The issue did not ask for a denormalized historical job snapshot. It asked for
+list items that can show the linked job context today. The correct shape is to
+join and project the data for the response while keeping the stored model
+unchanged.
+
+Real implementation/testing issue:
+
+The `/resumes/versions` route has to be registered before `/{resume_id}` in the
+router. If it is declared after the detail route, FastAPI treats the literal
+path segment `"versions"` as the `resume_id` parameter and the endpoint becomes
+unreachable.
+
+The integration file was added in the same style as the rest of the repo's API
+tests. Whether it runs cleanly locally still depends on the broader app test
+bootstrap in this environment, which has unrelated constraints on some
+branches.
+
+What future contributors should understand:
+
+Ownership for versions is not checked on `ResumeVersion` alone. The user owns
+the parent `Resume`, so version listing must continue to filter through that
+relationship.
+
+Also, if you later add per-resume version history endpoints, keep this
+cross-resume list. It serves a different product use case and should not be
+replaced by a narrower nested route.
