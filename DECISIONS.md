@@ -891,7 +891,135 @@ behavior should be.
 
 ---
 
-## ADR-035 — Resume version detail resolves current approved bullets and evidence display metadata
+## ADR-035 — Resume bullet generation is request-driven but evidence-validated before persistence
+
+**Date:** 2026-04-15 (issue #28)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#28` replaced the placeholder resume bullet generator with the real
+Phase 1 flow. The implementation question was where the generation context
+should come from and how much of the provider output could be trusted. The
+issue contract explicitly chose a request-driven shape:
+
+- the caller names one profile entity (`work_experience` or `project`)
+- the caller supplies the target `JobRequirement` IDs
+- the service builds one `BulletContext` per requested requirement
+
+That makes the API flexible, but it also creates a trust boundary: provider
+output must still be checked before it is written to the database.
+
+**Decision:**  
+- `POST /resumes/{id}/bullets/generate` accepts a request body containing
+  `profile_entity_type`, `profile_entity_id`, and `requirement_ids`.  
+- Resume ownership is enforced first. The selected profile entity is then
+  resolved through the authenticated user's `Profile`, so callers cannot target
+  another user's work experience or project row.  
+- The service loads `JobRequirement` rows by the provided IDs and converts each
+  one into a `BulletContext` using a minimal entity summary:
+  - work experience → `"{role_title} at {employer}"`
+  - project → `"{name}"`  
+- The service checks the user's daily AI budget before calling the provider and
+  logs provider token usage through `AICostService`.  
+- Provider output is treated as advisory, not authoritative: a generated bullet
+  is persisted only if its `evidence_entity_id` matches the requested profile
+  entity ID from the generated contexts. Invalid evidence references are
+  discarded instead of saved.  
+- Saved bullets are always persisted as AI-generated and unapproved by default;
+  approval/snapshot flows remain separate later-stage actions.
+
+**Consequences:**  
+- The API contract is now explicit and request-driven rather than inferred from
+  prior job-analysis state. That keeps the endpoint focused on bullet
+  generation, not analysis lookup.  
+- Ownership still holds at the service layer because entity lookup is scoped
+  through the authenticated user's profile before any provider call is made.  
+- Hallucinated or drifted evidence references from the provider are discarded
+  rather than persisted and shown to users as if they were verified.  
+- The provider contract remains simple: it returns candidate bullets and their
+  evidence pointers, while the service layer owns validation, persistence, and
+  ownership enforcement.  
+- If future work expands generation to other entity types, that work should add
+  both request validation and post-generation evidence validation for the new
+  type, not just prompt construction.
+
+---
+
+## ADR-036 — Signed download endpoint integration tests validate only the HTTP contract, not object storage
+
+**Date:** 2026-04-15 (issue #20)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#20` already had the implementation and service-layer tests: ownership
+is enforced in `FileService.get_download_url_for_user()`, the response schema
+exposes only `url`, and the download TTL is config-driven. What was missing was
+HTTP-layer coverage for `GET /api/v1/files/{file_id}/url`. The design question
+was how to test the endpoint without turning a file URL contract test into an
+integration test for MinIO or boto3.
+
+**Decision:**  
+- Integration tests for the signed download endpoint seed `UploadedFile` rows
+  directly in the database instead of going through the upload flow.  
+- The HTTP tests monkeypatch `FileService.get_presigned_url()` so the endpoint
+  contract is verified without calling boto3 or requiring MinIO.  
+- The acceptance criteria at the HTTP layer are:
+  - owner gets `200` with `{"url": "..."}` only
+  - cross-user access returns `404`
+  - non-existent file IDs return `404`
+  - the generated URL path uses the configured short TTL
+- Internal fields like `storage_key` remain an implementation detail and are
+  explicitly excluded from the response contract.
+
+**Consequences:**  
+- The file download endpoint now has parity with other entity endpoints: there
+  is a real HTTP integration test module, not just service-level coverage.  
+- Endpoint tests stay fast and deterministic because they verify authorization,
+  status codes, response shape, and TTL plumbing without depending on object
+  storage infrastructure.  
+- If MinIO or boto3 integration needs to be tested later, that should be added
+  as a separate infrastructure-level test path instead of bloating the endpoint
+  contract tests.
+
+---
+
+## ADR-037 — Resume bullet approval and rejection are ownership-scoped by resume, not bullet alone
+
+**Date:** 2026-04-15 (issue #29)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#29` adds the approve and reject flows for generated resume bullets.
+The core design question was how ownership should be enforced. A bullet is not
+an independent top-level resource in this model: it belongs to a `Resume`, and
+the `Resume` belongs to a `User`. That means bullet mutation must validate the
+resume ownership boundary, not just whether a `bullet_id` exists.
+
+**Decision:**  
+- Approve/reject operations scope the lookup by both `resume_id` and `bullet_id`
+  and join through `Resume` to require `Resume.user_id == user_id`.  
+- If the bullet is missing or belongs to another user's resume, the service
+  returns a not-found result rather than exposing cross-user existence.  
+- Approval is an in-place mutation: `is_approved = True`, then flush.  
+- Rejection is modeled as deletion of the `ResumeBullet` row. `EvidenceLink`
+  cleanup relies on the existing `ON DELETE CASCADE` relationship rather than
+  manual child-row deletion in the service layer.  
+- The HTTP API maps:
+  - approve success → `200` with `ResumeBulletRead`
+  - reject success → `204 No Content`
+  - cross-user or missing bullet → `404`
+
+**Consequences:**  
+- Bullet mutations now follow the same ownership posture as the rest of the
+  API: callers cannot distinguish "missing" from "belongs to someone else."  
+- The service logic stays simple because referential cleanup is delegated to the
+  existing database/model cascade on `EvidenceLink`.  
+- Future bullet mutations should reuse the same resume-scoped ownership lookup
+  instead of querying `ResumeBullet` by ID alone.
+
+---
+
+## ADR-038 — Resume version detail resolves current approved bullets and evidence display metadata
 
 **Date:** 2026-04-15 (issue #32)  
 **Status:** Accepted

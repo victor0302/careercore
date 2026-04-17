@@ -2,6 +2,7 @@
 
 from datetime import datetime
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -27,6 +28,12 @@ class ResumeBulletRead(BaseModel):
     is_ai_generated: bool
     is_approved: bool
     confidence: float | None
+
+
+class BulletsGenerateRequest(BaseModel):
+    profile_entity_type: Literal["work_experience", "project"]
+    profile_entity_id: uuid.UUID
+    requirement_ids: list[uuid.UUID]
 
 
 class ResumeBulletApprove(BaseModel):
