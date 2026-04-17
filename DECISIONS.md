@@ -891,7 +891,181 @@ behavior should be.
 
 ---
 
-## ADR-035 — Resume version listing is user-scoped and enriches versions with linked job metadata
+## ADR-035 — Resume bullet generation is request-driven but evidence-validated before persistence
+
+**Date:** 2026-04-15 (issue #28)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#28` replaced the placeholder resume bullet generator with the real
+Phase 1 flow. The implementation question was where the generation context
+should come from and how much of the provider output could be trusted. The
+issue contract explicitly chose a request-driven shape:
+
+- the caller names one profile entity (`work_experience` or `project`)
+- the caller supplies the target `JobRequirement` IDs
+- the service builds one `BulletContext` per requested requirement
+
+That makes the API flexible, but it also creates a trust boundary: provider
+output must still be checked before it is written to the database.
+
+**Decision:**  
+- `POST /resumes/{id}/bullets/generate` accepts a request body containing
+  `profile_entity_type`, `profile_entity_id`, and `requirement_ids`.  
+- Resume ownership is enforced first. The selected profile entity is then
+  resolved through the authenticated user's `Profile`, so callers cannot target
+  another user's work experience or project row.  
+- The service loads `JobRequirement` rows by the provided IDs and converts each
+  one into a `BulletContext` using a minimal entity summary:
+  - work experience → `"{role_title} at {employer}"`
+  - project → `"{name}"`  
+- The service checks the user's daily AI budget before calling the provider and
+  logs provider token usage through `AICostService`.  
+- Provider output is treated as advisory, not authoritative: a generated bullet
+  is persisted only if its `evidence_entity_id` matches the requested profile
+  entity ID from the generated contexts. Invalid evidence references are
+  discarded instead of saved.  
+- Saved bullets are always persisted as AI-generated and unapproved by default;
+  approval/snapshot flows remain separate later-stage actions.
+
+**Consequences:**  
+- The API contract is now explicit and request-driven rather than inferred from
+  prior job-analysis state. That keeps the endpoint focused on bullet
+  generation, not analysis lookup.  
+- Ownership still holds at the service layer because entity lookup is scoped
+  through the authenticated user's profile before any provider call is made.  
+- Hallucinated or drifted evidence references from the provider are discarded
+  rather than persisted and shown to users as if they were verified.  
+- The provider contract remains simple: it returns candidate bullets and their
+  evidence pointers, while the service layer owns validation, persistence, and
+  ownership enforcement.  
+- If future work expands generation to other entity types, that work should add
+  both request validation and post-generation evidence validation for the new
+  type, not just prompt construction.
+
+---
+
+## ADR-036 — Signed download endpoint integration tests validate only the HTTP contract, not object storage
+
+**Date:** 2026-04-15 (issue #20)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#20` already had the implementation and service-layer tests: ownership
+is enforced in `FileService.get_download_url_for_user()`, the response schema
+exposes only `url`, and the download TTL is config-driven. What was missing was
+HTTP-layer coverage for `GET /api/v1/files/{file_id}/url`. The design question
+was how to test the endpoint without turning a file URL contract test into an
+integration test for MinIO or boto3.
+
+**Decision:**  
+- Integration tests for the signed download endpoint seed `UploadedFile` rows
+  directly in the database instead of going through the upload flow.  
+- The HTTP tests monkeypatch `FileService.get_presigned_url()` so the endpoint
+  contract is verified without calling boto3 or requiring MinIO.  
+- The acceptance criteria at the HTTP layer are:
+  - owner gets `200` with `{"url": "..."}` only
+  - cross-user access returns `404`
+  - non-existent file IDs return `404`
+  - the generated URL path uses the configured short TTL
+- Internal fields like `storage_key` remain an implementation detail and are
+  explicitly excluded from the response contract.
+
+**Consequences:**  
+- The file download endpoint now has parity with other entity endpoints: there
+  is a real HTTP integration test module, not just service-level coverage.  
+- Endpoint tests stay fast and deterministic because they verify authorization,
+  status codes, response shape, and TTL plumbing without depending on object
+  storage infrastructure.  
+- If MinIO or boto3 integration needs to be tested later, that should be added
+  as a separate infrastructure-level test path instead of bloating the endpoint
+  contract tests.
+
+---
+
+## ADR-037 — Resume bullet approval and rejection are ownership-scoped by resume, not bullet alone
+
+**Date:** 2026-04-15 (issue #29)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#29` adds the approve and reject flows for generated resume bullets.
+The core design question was how ownership should be enforced. A bullet is not
+an independent top-level resource in this model: it belongs to a `Resume`, and
+the `Resume` belongs to a `User`. That means bullet mutation must validate the
+resume ownership boundary, not just whether a `bullet_id` exists.
+
+**Decision:**  
+- Approve/reject operations scope the lookup by both `resume_id` and `bullet_id`
+  and join through `Resume` to require `Resume.user_id == user_id`.  
+- If the bullet is missing or belongs to another user's resume, the service
+  returns a not-found result rather than exposing cross-user existence.  
+- Approval is an in-place mutation: `is_approved = True`, then flush.  
+- Rejection is modeled as deletion of the `ResumeBullet` row. `EvidenceLink`
+  cleanup relies on the existing `ON DELETE CASCADE` relationship rather than
+  manual child-row deletion in the service layer.  
+- The HTTP API maps:
+  - approve success → `200` with `ResumeBulletRead`
+  - reject success → `204 No Content`
+  - cross-user or missing bullet → `404`
+
+**Consequences:**  
+- Bullet mutations now follow the same ownership posture as the rest of the
+  API: callers cannot distinguish "missing" from "belongs to someone else."  
+- The service logic stays simple because referential cleanup is delegated to the
+  existing database/model cascade on `EvidenceLink`.  
+- Future bullet mutations should reuse the same resume-scoped ownership lookup
+  instead of querying `ResumeBullet` by ID alone.
+
+---
+
+## ADR-038 — Resume version detail resolves current approved bullets and evidence display metadata
+
+**Date:** 2026-04-15 (issue #32)  
+**Status:** Accepted
+
+**Context:**  
+Issue `#32` added the detail view for a saved resume version. In Phase 1,
+`ResumeVersion` does not persist its own frozen bullet set or evidence snapshot.
+The product still needs a useful detail page now, which means the API must show
+the version row plus the currently approved bullets on the parent resume and
+human-readable evidence names. The design question was whether to fake a
+historical archive shape now or expose the current approved state honestly.
+
+**Decision:**  
+- `GET /api/v1/resumes/versions/{version_id}` returns:
+  - the `ResumeVersion` identifiers and saved fit score
+  - linked job title/company when the parent resume has a job
+  - the parent resume's **currently approved** bullets
+  - each bullet's resolved evidence metadata
+- Ownership is enforced through the parent resume:
+  - load `ResumeVersion`
+  - join/load its `Resume`
+  - return `404` unless `Resume.user_id == current_user.id`
+- Evidence resolution is done at read time:
+  - `work_experience` -> `"role_title at employer"`
+  - `project` -> `name`
+  - missing referenced entities fall back to `"Unknown"`
+- Only `ResumeBullet.is_approved=True` rows appear in version detail. Draft or
+  rejected bullets are excluded even if they belong to the same resume.
+- Phase 1 does **not** pretend this is immutable version history. The endpoint
+  deliberately exposes current approved bullets until a later phase adds real
+  persisted snapshot content.
+
+**Consequences:**  
+- The version detail endpoint is useful immediately without introducing a
+  premature denormalized archive model.  
+- Consumers get readable evidence labels instead of raw foreign UUIDs only,
+  which makes the detail view understandable to humans.  
+- The response is honest about current system behavior: it is a checkpoint row
+  plus the resume's current approved state, not a guaranteed historical replay.  
+- When immutable version playback is added later, it should be introduced as an
+  explicit contract change rather than silently changing the meaning of this
+  Phase 1 endpoint.
+
+---
+
+## ADR-039 — Resume version listing is user-scoped and enriches versions with linked job metadata
 
 **Date:** 2026-04-15 (issue #31)  
 **Status:** Accepted
@@ -908,11 +1082,11 @@ that enrichment and how broad the list scope should be.
 - Version history is exposed as a top-level user-scoped list endpoint:
   `GET /api/v1/resumes/versions`  
 - The endpoint returns version rows across **all** resumes owned by the
-  authenticated user, not just one resume at a time.  
+authenticated user, not just one resume at a time.  
 - Ownership is enforced through `Resume.user_id == current_user.id`. Versions
-  for any other user's resumes are omitted entirely.  
+for any other user's resumes are omitted entirely.  
 - The service joins from `ResumeVersion -> Resume` and eager-loads the optional
-  `Resume.job` relationship so each list item can include:
+`Resume.job` relationship so each list item can include:
   - `id`
   - `resume_id`
   - `fit_score_at_gen`
@@ -920,17 +1094,17 @@ that enrichment and how broad the list scope should be.
   - `job_title`
   - `job_company`
 - Pagination uses `skip`/`limit` query params with `limit` defaulting to `20`
-  and capped at `100`, matching the project's existing API style.  
+and capped at `100`, matching the project's existing API style.  
 - Job metadata is treated as presentation data for the list item, not new
-  persisted columns on `ResumeVersion`.
+persisted columns on `ResumeVersion`.
 
 **Consequences:**  
 - Clients can render a unified “saved versions” history without issuing
-  secondary requests per resume to recover job context.  
+secondary requests per resume to recover job context.  
 - Version listing stays ownership-safe because the filter is applied at the
-  resume join point, which is the actual parent object users own.  
+resume join point, which is the actual parent object users own.  
 - Resumes without a linked job still participate in history; their `job_title`
-  and `job_company` are simply `null`.  
+and `job_company` are simply `null`.  
 - The version row schema remains normalized. If richer denormalized history is
-  needed later, it should be introduced deliberately instead of smuggling job
-  snapshots into the current model.
+needed later, it should be introduced deliberately instead of smuggling job
+snapshots into the current model.
