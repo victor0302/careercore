@@ -1,5 +1,5 @@
-from datetime import date, datetime, timedelta, timezone
 import uuid
+from datetime import date, datetime, timedelta, timezone
 
 from app.core.security import hash_password
 from app.models.job_description import JobDescription
