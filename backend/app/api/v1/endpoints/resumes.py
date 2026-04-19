@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.dependencies import get_ai_provider
 from app.ai.exceptions import BudgetExceededError
 from app.ai.provider import AIProvider
+from app.core.config import get_settings
 from app.core.dependencies import get_current_user
+from app.core.rate_limit import AIRateLimiter
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.resume import (
@@ -25,6 +27,13 @@ from app.schemas.resume import (
 from app.services.resume_service import ResumeService
 
 router = APIRouter()
+
+_settings = get_settings()
+_generate_rate_limiter = AIRateLimiter(
+    endpoint_name="generate",
+    max_requests=_settings.AI_GENERATE_RATE_LIMIT_REQUESTS,
+    window_seconds=_settings.AI_GENERATE_RATE_LIMIT_WINDOW_SECONDS,
+)
 
 
 @router.get("", response_model=list[ResumeRead])
@@ -141,6 +150,7 @@ async def generate_bullets(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     ai: AIProvider = Depends(get_ai_provider),
+    _rl: None = Depends(_generate_rate_limiter),
 ) -> list[ResumeBulletRead]:
     """Generate AI resume bullets for a resume."""
     service = ResumeService(db, ai)
