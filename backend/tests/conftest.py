@@ -105,16 +105,31 @@ async def client(db: AsyncSession) -> AsyncGenerator[AsyncClient, None]:  # type
     async def _stub_ttl(redis, key: str) -> int:
         return 900
 
+    # Sliding-window stubs for AIRateLimiter — return count=1 (below any limit)
+    # so AI endpoints are effectively un-rate-limited during normal tests.
+    async def _stub_sw_record(redis, key: str, now_ms: float, window_ms: float) -> int:
+        _counts[key] += 1
+        return _counts[key]
+
+    async def _stub_sw_oldest_ms(redis, key: str) -> float:
+        return 0.0
+
     original_incr = rl_module._increment_counter
     original_ttl = rl_module._get_ttl
+    original_sw_record = rl_module._sw_record
+    original_sw_oldest_ms = rl_module._sw_oldest_ms
     rl_module._increment_counter = _stub_increment  # type: ignore[assignment]
     rl_module._get_ttl = _stub_ttl  # type: ignore[assignment]
+    rl_module._sw_record = _stub_sw_record  # type: ignore[assignment]
+    rl_module._sw_oldest_ms = _stub_sw_oldest_ms  # type: ignore[assignment]
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
 
     rl_module._increment_counter = original_incr  # type: ignore[assignment]
     rl_module._get_ttl = original_ttl  # type: ignore[assignment]
+    rl_module._sw_record = original_sw_record  # type: ignore[assignment]
+    rl_module._sw_oldest_ms = original_sw_oldest_ms  # type: ignore[assignment]
     app.dependency_overrides.clear()
 
 

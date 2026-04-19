@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     FREE_TIER_DAILY_TOKEN_BUDGET: int = 50_000
     STANDARD_DAILY_TOKEN_BUDGET: int = 200_000
 
+    # AI endpoint rate limits (sliding window, per user)
+    AI_ANALYZE_RATE_LIMIT_REQUESTS: int = 5
+    AI_ANALYZE_RATE_LIMIT_WINDOW_SECONDS: int = 3600
+    AI_GENERATE_RATE_LIMIT_REQUESTS: int = 10
+    AI_GENERATE_RATE_LIMIT_WINDOW_SECONDS: int = 3600
+
     # CORS — comma-separated list of origins
     CORS_ORIGINS: str = "http://localhost:3000"
 

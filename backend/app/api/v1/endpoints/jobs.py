@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.dependencies import get_ai_provider
 from app.ai.exceptions import BudgetExceededError
 from app.ai.provider import AIProvider
+from app.core.config import get_settings
 from app.core.dependencies import get_current_user
+from app.core.rate_limit import AIRateLimiter
 from app.db.session import get_db
 from app.models.job_analysis import JobAnalysis
 from app.models.job_description import JobDescription
@@ -27,6 +29,13 @@ from app.schemas.job import (
 from app.services.job_service import JobService
 
 router = APIRouter()
+
+_settings = get_settings()
+_parse_rate_limiter = AIRateLimiter(
+    endpoint_name="analyze",
+    max_requests=_settings.AI_ANALYZE_RATE_LIMIT_REQUESTS,
+    window_seconds=_settings.AI_ANALYZE_RATE_LIMIT_WINDOW_SECONDS,
+)
 
 
 def _serialize_analysis_summary(analysis: JobAnalysis) -> JobAnalysisSummaryRead:
@@ -131,6 +140,7 @@ async def parse_job(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     ai: AIProvider = Depends(get_ai_provider),
+    _rl: None = Depends(_parse_rate_limiter),
 ) -> JobDescriptionRead:
     """Trigger AI parsing of a job description.
 
