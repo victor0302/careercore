@@ -57,7 +57,10 @@ async def create_resume(
 ) -> ResumeRead:
     """Create a new resume, optionally tied to a job description."""
     service = ResumeService(db, ai)
-    resume = await service.create(current_user.id, data)
+    try:
+        resume = await service.create(current_user.id, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return ResumeRead.model_validate(resume)
 
 
