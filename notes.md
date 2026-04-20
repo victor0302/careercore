@@ -3296,3 +3296,168 @@ relationship.
 Also, if you later add per-resume version history endpoints, keep this
 cross-resume list. It serves a different product use case and should not be
 replaced by a narrower nested route.
+
+### 12.35 Issue #11 — Redis-backed fixed-window rate limiting on auth endpoints
+
+The auth endpoints (login, register, refresh) had no rate limiting. A brute-force
+tool could attempt unlimited credential guesses with no back-pressure.
+
+What changed:
+- Added `app/core/rate_limit.py` with a `RateLimiter` FastAPI dependency
+- Strategy: Redis `INCR` + `EXPIRE` (fixed window, 10 requests / 900 seconds)
+- Key format: `rate_limit:{path}:{client_ip}` — per-path, per-IP isolation
+- 429 responses include a `Retry-After` header whose value is the remaining TTL
+  of the current window key
+- Two module-level helpers (`_increment_counter`, `_get_ttl`) are extracted so
+  tests can monkeypatch them without touching Redis
+
+Why fixed window (not sliding window) for auth?
+
+The auth endpoints are protected against credential-stuffing, not precision
+burst control. Fixed window is simpler (two Redis commands vs four), cheaper,
+and correct for this use case. The worst-case boundary burst (two window-maxes
+in sequence at the boundary) is acceptable for login rate limiting.
+
+Why IP-scoped (not user-scoped)?
+
+Unauthenticated requests have no user context. The only stable identifier
+available before authentication is the client IP.
+
+Real implementation issue:
+
+`_get_redis` is a module-level function, not a class. FastAPI's
+`app.dependency_overrides` replaces the function reference in the DI graph.
+Test fixtures override `_get_redis` to return `None` and monkeypatch the
+counter helpers so no real Redis call is ever made from unit or integration
+tests.
+
+What future contributors should understand:
+
+Do not replace the fixed-window helpers with the sliding-window sorted-set
+helpers from `AIRateLimiter`. The auth limiter intentionally stays simple.
+The two implementations coexist in the same module with different key prefixes.
+
+---
+
+### 12.36 Issue #37 — Per-user Redis sliding-window rate limiting on AI endpoints
+
+The expensive AI endpoints (parse and generate) needed burst constraints
+independent of the daily token budget. The token budget prevents runaway
+spending across a full day. The rate limiter prevents someone from exhausting
+that budget in seconds.
+
+What changed:
+- Added `AIRateLimiter` class to `app/core/rate_limit.py`
+- Two module-level helpers: `_sw_record` and `_sw_oldest_ms`
+- Key format: `ai_rate_limit:{endpoint_name}:{user_id}`
+- Strategy: Redis sorted-set sliding window (ZADD + ZREMRANGEBYSCORE + ZCARD)
+- `POST /api/v1/jobs/{id}/parse` — `_parse_rate_limiter` (5 req / 3600 s)
+- `POST /api/v1/resumes/{id}/bullets/generate` — `_generate_rate_limiter` (10 req / 3600 s)
+- Thresholds live in config as `AI_ANALYZE_RATE_LIMIT_*` and `AI_GENERATE_RATE_LIMIT_*`
+
+Why sliding window (not fixed window) for AI endpoints?
+
+The auth limiter uses fixed window because boundary bursts are acceptable for
+brute-force prevention. AI endpoints are expensive and user-visible. A fixed
+window allows a user to exhaust their hourly allowance, wait for the boundary,
+and immediately exhaust it again — doubling their effective burst. Sliding
+window prevents this: the oldest slot must genuinely expire before a new one
+is available.
+
+Why sorted set (ZADD scores = epoch ms)?
+
+ZADD with score = current timestamp enables O(log N) insertion and O(log N)
+range deletion in a single pipeline. ZCARD after the prune gives the count
+within the current window. The pipeline (`ZADD`, `ZREMRANGEBYSCORE`, `ZCARD`,
+`EXPIRE`) executes atomically from Redis's perspective.
+
+Why per-user (not per-IP) for AI?
+
+AI calls are always authenticated. User ID is always available in the
+dependency chain. Per-user limits are fair regardless of NAT, VPN, or shared
+networks. Two users on the same corporate IP should not share an AI budget.
+
+Why `Retry-After` from oldest-entry timestamp?
+
+The sorted set's minimum score is the oldest request in the window. When the
+limit fires, `oldest_ms + window_ms - now_ms` is the exact milliseconds until
+the first slot opens. This gives clients a precise, actionable wait time rather
+than a conservative upper bound.
+
+Real implementation issue:
+
+`AIRateLimiter.__call__` depends on `get_current_user` — the same dependency
+used by the endpoint itself. FastAPI deduplicates dependencies, so the user is
+resolved once and shared. The `_rl: None = Depends(...)` pattern is the
+accepted idiom for side-effect-only dependencies in this codebase.
+
+What future contributors should understand:
+
+The analyze and generate limits are independent by endpoint name in the key.
+Exhausting the analyze limit does not affect the generate limit.
+
+Do not collapse these into a single shared AI limit. The endpoints have
+different costs (generate is a multi-bullet batch, parse is a single
+structured extraction) and different acceptable burst profiles.
+
+If the sorted-set approach shows memory pressure, the window can be shortened
+or the key can be stored with a tighter TTL. Do not switch to fixed window
+without understanding the burst implications.
+
+---
+
+### 12.37 Issue #95 — Redis budget cache in AICostService
+
+`check_budget()` previously queried `ai_call_logs` on every single AI call.
+Every parse or generate request did a `SUM(total_tokens)` aggregation against
+the full day's rows before calling the provider. Under moderate load this meant
+multiple expensive DB reads per user per minute.
+
+What changed:
+- `check_budget()` reads `budget:{user_id}:{YYYY-MM-DD}` from Redis before
+  hitting the DB. On a cache miss it queries the DB and stores the result.
+  Cache TTL is set to expire at midnight UTC (next calendar day boundary).
+- `log_call()` deletes the cache key after every successful write so the next
+  `check_budget()` reads a fresh DB total.
+- Three module-level helpers (`_budget_cache_read`, `_budget_cache_write`,
+  `_budget_cache_delete`) are extracted for monkeypatching.
+- Removed the stale TODO comment from `POST /jobs/{id}/parse` — the budget
+  check was already wired via `JobService.parse()`; this PR made it cheap.
+
+Why cache-aside (read-through with invalidation) rather than write-through?
+
+Write-through would increment the Redis key in `log_call()` instead of
+deleting it. That is fragile: if the key was never set (Redis was unavailable
+during `check_budget()`), the `INCRBY` creates a key with only the delta,
+not the real daily total. Invalidating is always safe: worst case is a single
+extra DB read on the next check. Write-through requires knowing the prior state.
+
+Why delete on success only (not on failure)?
+
+A failed AI call does not change the user's token count. Deleting the cache
+key on failure would cause an unnecessary DB read on the next check. The key
+remains valid after a failed call.
+
+Why midnight UTC as the TTL boundary?
+
+The daily budget resets at UTC midnight (matching the `func.date(created_at)`
+filter in `_tokens_used_today`). Setting the TTL to expire at midnight means
+the cache can never serve a stale value across the day boundary — the cache
+self-invalidates at the same moment the budget resets.
+
+Why best-effort (swallows all Redis errors)?
+
+Redis is not the source of truth — `ai_call_logs` is. A Redis outage must not
+block AI calls. Every helper wraps its Redis call in a try/except and returns a
+safe fallback. This degrades gracefully to the pre-cache behavior (one DB query
+per check) under Redis unavailability.
+
+What future contributors should understand:
+
+If you add a new AI endpoint type (e.g. `answer_followup`), ensure its
+`check_budget()` call is made before the AI provider call, and `log_call()` is
+called in all paths (success and failure). The cache handles itself.
+
+Do not cache the budget limit itself (FREE_TIER_DAILY_TOKEN_BUDGET etc.) — that
+comes from config and is already an in-process constant. Only the per-user daily
+usage total needs caching.
