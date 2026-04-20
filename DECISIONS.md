@@ -1171,3 +1171,62 @@ Invalidation (delete) was chosen over write-through (INCRBY) because write-throu
 - A Redis outage degrades gracefully to the pre-cache behavior (one DB aggregation per check).  
 - The day boundary is handled automatically by the TTL — no cron job or manual invalidation needed.  
 - Token budget enforcement remains authoritative from the DB; Redis is a read cache only.
+
+---
+
+## ADR-042 — Docker Compose port exposure: only frontend, backend, and MinIO console on host
+
+**Date:** 2026-04-20 (PR #100, issue #43)  
+**Status:** Accepted
+
+**Context:**  
+The original compose file exposed MinIO's S3 API port 9000 to the host alongside the console port 9001. The MinIO S3 API is an internal service-to-service interface; exposing it to the developer's host implies it is a public endpoint and creates an unnecessary attack surface in shared or CI environments.
+
+**Decision:**  
+Host-exposed ports are limited to exactly three:
+
+| Port | Service | Purpose |
+|------|---------|---------|
+| 3000 | frontend | Next.js dev server — browser access |
+| 8000 | backend | FastAPI / uvicorn — API and health check |
+| 9001 | storage | MinIO Console — bucket inspection |
+
+PostgreSQL (5432), Redis (6379), and MinIO S3 API (9000) are internal to the `careercore-net` Docker network and are not accessible from the host.
+
+**Consequences:**  
+- Developers who need to inspect buckets use the MinIO Console on 9001.
+- The backend generates presigned URLs using the internal `storage:9000` address; those URLs are consumed server-side, not by the browser directly in Phase 1.
+- Shrinks the host attack surface on developer machines and CI runners.
+
+---
+
+## ADR-043 — Health-gated depends_on and one-shot init container pattern
+
+**Date:** 2026-04-20 (PR #100, issue #43)  
+**Status:** Accepted
+
+**Context:**  
+Docker Compose `depends_on` with bare service names only waits for the container to *start*, not for it to be *ready*. The original compose had the worker starting before postgres accepted connections, `storage_init` using a hardcoded `sleep 5` instead of waiting for MinIO to be ready, and no health checks on backend, worker, or frontend.
+
+**Decision:**  
+Every long-running service has a `healthcheck:` directive:
+
+| Service | Health check | Notes |
+|---------|-------------|-------|
+| db | `pg_isready -U careercore -d careercore` | — |
+| redis | `redis-cli ping` | — |
+| storage | `curl -f http://localhost:9000/minio/health/live` | MinIO liveness endpoint |
+| backend | `curl -f http://localhost:8000/health` | `start_period: 40s` for uvicorn startup |
+| worker | `celery inspect ping --timeout 5` | Confirms broker connection |
+| frontend | `wget --spider http://localhost:3000` | `start_period: 60s` for dev cold compile |
+
+All `depends_on` entries use explicit conditions:
+- `condition: service_healthy` — for long-running services that must be accepting requests.
+- `condition: service_completed_successfully` — for `storage_init`, which is a one-shot init container that exits 0 after creating the bucket. `service_healthy` would never be satisfied for an exited container.
+
+`storage_init`'s `sleep 5` was replaced with `depends_on: storage: condition: service_healthy` so bucket creation is reliable regardless of host machine speed.
+
+**Consequences:**  
+- `docker compose up` from a clean clone produces a fully healthy stack without manual retries or timing workarounds.
+- Any new long-running service must include a `healthcheck:` or the stack will not self-stabilize.
+- Any new one-shot init container must use `restart: "no"` and be depended upon with `condition: service_completed_successfully`.
