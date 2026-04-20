@@ -179,7 +179,7 @@ AICostService.check_budget(user) → AI call → AICostService.log_call(...)
 `check_budget` reads today's `AICallLog` rows for the user and raises `BudgetExceededError` before making any API call. `log_call` writes success and failure outcomes alike.
 
 **Consequences:**  
-No AI call can succeed without a prior budget check. Failure logging means debugging is possible even when the upstream API is down. Phase 2 will add Redis caching for `(user_id, date) → total_tokens` to avoid querying `ai_call_logs` on every check.
+No AI call can succeed without a prior budget check. Failure logging means debugging is possible even when the upstream API is down. Redis caching for `(user_id, date) → total_tokens` was added in PR #98 (issue #95) — see ADR-041.
 
 ---
 
@@ -1108,3 +1108,66 @@ and `job_company` are simply `null`.
 - The version row schema remains normalized. If richer denormalized history is
 needed later, it should be introduced deliberately instead of smuggling job
 snapshots into the current model.
+
+---
+
+## ADR-040 — Fixed-window rate limiting on auth endpoints, sliding-window on AI endpoints
+
+**Date:** 2026-04-18 (PR #93, issue #11; PR #97, issue #37)  
+**Status:** Accepted
+
+**Context:**  
+Two classes of endpoints needed rate limiting with different characteristics:
+- Auth endpoints (login, register, refresh): unauthenticated, protect against credential-stuffing.
+- AI endpoints (parse, generate): authenticated, protect against burst exhaustion of expensive API calls.
+
+**Decision:**
+
+| Endpoint class | Strategy | Key | Limit |
+|----------------|----------|-----|-------|
+| Auth | Fixed window (INCR + EXPIRE) | `rate_limit:{path}:{client_ip}` | 10 req / 900 s |
+| AI analyze | Sliding window (sorted set) | `ai_rate_limit:analyze:{user_id}` | 5 req / 3600 s |
+| AI generate | Sliding window (sorted set) | `ai_rate_limit:generate:{user_id}` | 10 req / 3600 s |
+
+Auth uses fixed window (two Redis commands) because boundary bursts are acceptable for brute-force prevention and the lower complexity is appropriate. AI endpoints use sliding window (ZADD + ZREMRANGEBYSCORE + ZCARD + EXPIRE pipeline) because the cost of a burst is high and users should not be able to double-burst at window boundaries.
+
+Auth limits are per-IP because requests are unauthenticated. AI limits are per-user because requests are authenticated and users on shared IPs should have independent allowances.
+
+All limits are configurable via `app/core/config.py`. Both implementations live in `app/core/rate_limit.py` with extracted module-level helpers for test monkeypatching. All 429 responses include a `Retry-After` header.
+
+**Consequences:**  
+- Burst AI usage is constrained independently of the daily token budget.  
+- Per-user AI limits are fair across NAT/VPN boundaries.  
+- `Retry-After` for sliding-window limits is exact (computed from oldest sorted-set entry), not a conservative upper bound.  
+- Test suite never touches real Redis: `_get_redis` is overridden to return `None` and counter/window helpers are monkeypatched.
+
+---
+
+## ADR-041 — Cache-aside Redis caching for daily AI token budget
+
+**Date:** 2026-04-19 (PR #98, issue #95)  
+**Status:** Accepted
+
+**Context:**  
+`AICostService.check_budget()` aggregated `ai_call_logs` via `SUM(total_tokens)` on every AI call. This was a DB round-trip on every parse and generate request, compounding with the AI provider call latency.
+
+**Decision:**  
+Cache-aside pattern keyed on `budget:{user_id}:{YYYY-MM-DD}`:
+
+1. `check_budget()` attempts `GET budget:{user_id}:{date}`.  
+2. On hit: use cached value directly — no DB query.  
+3. On miss (or Redis error): query DB, then `SET key value EX {ttl}`.  
+4. `log_call()` on success: `DEL budget:{user_id}:{date}`.  
+5. `log_call()` on failure: no-op on the cache.
+
+TTL is set to the number of seconds until midnight UTC — the cache key cannot outlive the budget day it represents. All Redis operations are best-effort; any exception falls back to the DB path without raising.
+
+Three module-level helpers (`_budget_cache_read`, `_budget_cache_write`, `_budget_cache_delete`) follow the same monkeypatchable pattern as the rate-limit helpers.
+
+Invalidation (delete) was chosen over write-through (INCRBY) because write-through requires knowing the prior cached state. If Redis was unavailable during `check_budget()`, the key does not exist, and a subsequent `INCRBY` would produce the wrong total. Deletion is always safe: worst case is one extra DB read.
+
+**Consequences:**  
+- Under normal load, `check_budget()` is a single Redis `GET` — no DB query.  
+- A Redis outage degrades gracefully to the pre-cache behavior (one DB aggregation per check).  
+- The day boundary is handled automatically by the TTL — no cron job or manual invalidation needed.  
+- Token budget enforcement remains authoritative from the DB; Redis is a read cache only.
