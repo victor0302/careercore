@@ -3528,3 +3528,75 @@ one-shot init container, depend on it with `condition: service_completed_success
 The `/health` endpoint on the backend (`GET /api/v1/health`) is the single source of truth
 for backend readiness. Do not use `curl http://localhost:8000/` — the root path is not
 guaranteed to return 200.
+
+### 12.39 Issue #44 — Integration tests for GET /health endpoint
+
+The `/health` endpoint (`app/api/v1/endpoints/health.py`) checks three external
+dependencies — PostgreSQL, Redis, and MinIO — and returns `{"status":"ok"}` + HTTP 200
+if all pass, or `{"status":"degraded"}` + HTTP 503 if any fail. The implementation was
+already complete. What was missing was an integration test suite verifying both the
+happy path and the three failure paths.
+
+What changed:
+
+**`backend/tests/integration/test_health.py`** (new file)
+
+Six tests across two groups:
+
+*200 paths*
+- `test_health_200_all_ok` — all three checks succeed; asserts status code 200, all
+  component statuses `"connected"`, and top-level status `"ok"`.
+- `test_health_version_from_config` — verifies the `version` field equals
+  `settings.APP_VERSION`; catches any wiring drift between the endpoint and config.
+- `test_health_no_auth_required` — no `Authorization` header present; confirms the
+  response is not 401 or 403 (the endpoint has no auth dependency).
+
+*503 paths*
+- `test_health_503_on_redis_failure` — `aioredis.ping()` raises; expects 503, `redis="error"`,
+  other components `"connected"`.
+- `test_health_503_on_storage_failure` — `boto3.head_bucket()` raises; expects 503,
+  `storage="error"`, others `"connected"`.
+- `test_health_503_on_db_failure` — `db.execute()` raises; expects 503, `db="error"`,
+  others `"connected"`.
+
+Why a dedicated `health_client` fixture rather than using the shared `client`?
+
+The shared `client` fixture depends on `db`, which depends on `test_engine`. `test_engine`
+calls `Base.metadata.create_all` on SQLite, which errors on `JSONB` columns in other
+models — a pre-existing compatibility issue. The health endpoint only runs `SELECT 1`
+against the DB; it has no model table dependencies. A minimal fixture that injects an
+`AsyncMock(spec=AsyncSession)` is sufficient and avoids the SQLite/JSONB failure entirely.
+
+Why `patch("boto3.client")` and not `patch("app.api.v1.endpoints.health.boto3.client")`?
+
+`boto3` is imported *inside* the `try` block in the health handler, not at module level.
+There is no `boto3` name in the module's global namespace to patch against. When the handler
+executes `import boto3`, Python returns the already-imported module from `sys.modules`.
+Patching `boto3.client` directly on the `boto3` module intercepts the call regardless of
+where the import statement lives.
+
+Why `patch("app.api.v1.endpoints.health.aioredis.from_url")` (module-level patch) for Redis?
+
+`aioredis` *is* imported at module level (`import redis.asyncio as aioredis`), so it is a
+name in the module's global namespace. The module-level patch is the correct form and
+specifically targets the health module without affecting aioredis usage elsewhere in the
+test process.
+
+Why test that no auth is required separately from the 200 test?
+
+The router configuration is the safest thing to verify explicitly — if someone accidentally
+adds an `Depends(get_current_user)` to the health router or its parent, the endpoint becomes
+unreachable to monitoring systems that don't carry tokens. Making this an explicit assertion
+means any accidental auth addition breaks a test immediately.
+
+What future contributors should understand:
+
+If you add a fourth dependency check to the health endpoint (e.g. Celery broker), add:
+1. A 200-path assertion in `test_health_200_all_ok` that the new field is `"connected"`.
+2. A dedicated 503 test for the failure path.
+3. A mock for whatever client the new check uses, following the same patch-at-call-site
+   pattern as boto3 or patch-at-module-level pattern as aioredis.
+
+The `health_client` fixture does not stub `_get_redis` (the dependency used by rate limiters).
+This is intentional — the health endpoint does not use that dependency. Do not add rate
+limiting to the health endpoint; monitoring systems must always be able to reach it.
