@@ -1230,3 +1230,48 @@ All `depends_on` entries use explicit conditions:
 - `docker compose up` from a clean clone produces a fully healthy stack without manual retries or timing workarounds.
 - Any new long-running service must include a `healthcheck:` or the stack will not self-stabilize.
 - Any new one-shot init container must use `restart: "no"` and be depended upon with `condition: service_completed_successfully`.
+
+---
+
+## ADR-044 — Integration test strategy for GET /health
+
+**Date:** 2026-04-20 (PR #102, issue #44)  
+**Status:** Accepted
+
+**Context:**  
+The `/health` endpoint was implemented but had no test coverage. The three dependency
+checks (DB, Redis, MinIO) each have a distinct failure mode and the 200 vs. 503 branching
+is the core invariant that monitoring integrations depend on.
+
+**Decision:**  
+Six integration tests in `backend/tests/integration/test_health.py`, split across
+200-path and 503-path groups:
+
+| Test | What is verified |
+|------|-----------------|
+| `test_health_200_all_ok` | All three checks pass → 200, all fields `"connected"` |
+| `test_health_version_from_config` | `version` field equals `settings.APP_VERSION` |
+| `test_health_no_auth_required` | No `Authorization` header → not 401/403 |
+| `test_health_503_on_redis_failure` | `aioredis.ping()` raises → 503, `redis="error"` |
+| `test_health_503_on_storage_failure` | `boto3.head_bucket()` raises → 503, `storage="error"` |
+| `test_health_503_on_db_failure` | `db.execute()` raises → 503, `db="error"` |
+
+A dedicated `health_client` fixture bypasses `test_engine` and the SQLite/JSONB
+incompatibility. The fixture injects an `AsyncMock(spec=AsyncSession)` directly into
+`get_db`, which is sufficient because `SELECT 1` has no model table dependency.
+
+Mocking strategy:
+- Redis: `patch("app.api.v1.endpoints.health.aioredis.from_url")` — `aioredis` is a
+  module-level name in `health.py`, so the module-level patch is canonical.
+- MinIO: `patch("boto3.client")` — `boto3` is imported inline inside the `try` block
+  (not a module-level name), so the patch must target the `boto3` module directly.
+- DB failure: override `app.dependency_overrides[get_db]` mid-test with a generator
+  yielding an `AsyncMock` whose `execute` raises.
+
+**Consequences:**  
+- The happy path and each individual failure path are independently verified.
+- No real DB, Redis, or MinIO is needed — tests run in CI without service containers.
+- The auth-free invariant is an explicit assertion; accidental auth addition breaks
+  the test immediately rather than silently breaking monitoring integrations.
+- The `health_client` fixture is self-contained and does not affect the shared `client`
+  fixture or any other test in the suite.
