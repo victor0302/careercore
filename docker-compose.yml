@@ -53,22 +53,27 @@ services:
     volumes:
       - minio_data:/data
     ports:
-      - "9000:9000"   # S3 API (not exposed to host in production)
       - "9001:9001"   # MinIO Console
     networks:
       - careercore-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
   # ── MinIO Init (creates bucket then exits) ─────────────────────────────────
   storage_init:
     image: minio/mc:latest
     depends_on:
-      - storage
+      storage:
+        condition: service_healthy
     networks:
       - careercore-net
     entrypoint: >
       /bin/sh -c "
-        sleep 5;
         mc alias set local http://storage:9000 minioadmin minioadmin;
         mc mb --ignore-existing local/careercore-uploads;
         mc anonymous set download local/careercore-uploads;
@@ -100,6 +105,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      storage_init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
     restart: unless-stopped
 
   # ── Celery Worker ───────────────────────────────────────────────────────────
@@ -121,8 +134,18 @@ services:
     networks:
       - careercore-net
     depends_on:
-      - backend
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      storage_init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app inspect ping --timeout 5 || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
 
   # ── Frontend (Next.js) ──────────────────────────────────────────────────────
@@ -142,4 +165,10 @@ services:
       - "3000:3000"
     networks:
       - careercore-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
