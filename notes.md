@@ -3461,3 +3461,70 @@ called in all paths (success and failure). The cache handles itself.
 Do not cache the budget limit itself (FREE_TIER_DAILY_TOKEN_BUDGET etc.) — that
 comes from config and is already an in-process constant. Only the per-user daily
 usage total needs caching.
+
+### 12.38 Issue #43 — Validate and finish Docker Compose local stack and health checks
+
+The Docker Compose file had several gaps that prevented a reliable `docker compose up`
+from a clean clone: no health checks on MinIO, backend, worker, or frontend; a fragile
+`sleep 5` in the bucket-init service; port 9000 (MinIO S3 API) exposed to the host
+when only the console port was intended; and the worker depending on services without
+waiting for them to actually be healthy.
+
+What changed:
+
+**`backend/Dockerfile.dev`**
+- Added `curl` to the `apt-get install` block so the compose health check can use
+  `curl -f http://localhost:8000/health`. The image previously had no HTTP client.
+
+**`docker-compose.yml`**
+- Removed the `9000:9000` host binding from `storage`. The MinIO S3 API is only
+  needed internally (backend → `storage:9000`). The console (`9001`) is still exposed.
+  Host-exposed ports are now exactly: `3000` (frontend), `8000` (backend), `9001` (MinIO console).
+- Added a health check to `storage`: `curl -f http://localhost:9000/minio/health/live`.
+  MinIO's liveness endpoint returns 200 when the server is accepting requests.
+- Replaced `sleep 5` in `storage_init` with `depends_on: storage: condition: service_healthy`.
+  The bucket now exists before any dependent service starts, regardless of MinIO's actual
+  startup time on the host machine.
+- Added a health check to `backend`: `curl -f http://localhost:8000/health` with a
+  `start_period: 40s` to give uvicorn time to start and run startup hooks.
+- Added `storage_init: condition: service_completed_successfully` to both `backend` and
+  `worker` so the upload bucket is guaranteed to exist before either service processes
+  file-related requests.
+- Changed `worker` depends_on from bare service names to `condition: service_healthy`
+  on `db` and `redis`. Previously the worker could start before postgres accepted connections.
+- Added a health check to `worker`: `celery inspect ping --timeout 5`. This confirms the
+  worker process is connected to the broker and accepting tasks.
+- Added a health check to `frontend`: `wget --spider http://localhost:3000` with a
+  `start_period: 60s` to allow for the slow Next.js dev server cold compile.
+
+Why `service_completed_successfully` for `storage_init` (not `service_healthy`)?
+
+`storage_init` is a one-shot container — it runs `mc mb`, exits 0 on success, and
+never becomes "healthy" in the Compose sense. `service_completed_successfully` is the
+correct condition for one-shot init containers. `service_healthy` would never be
+satisfied for a service that exits.
+
+Why `start_period` on backend and frontend but not on db/redis?
+
+`pg_isready` and `redis-cli ping` are trivially fast once the process is up. The backend
+has a Python import phase and Alembic-style startup hooks; 40 seconds prevents false
+negatives during slow first-boot builds. The frontend has a webpack/Turbopack compilation
+on first request; 60 seconds covers the typical cold-compile window.
+
+Why not expose port 9000 to the developer's host?
+
+The backend generates presigned MinIO URLs using the `MINIO_ENDPOINT=storage:9000` Docker
+internal address. Those URLs are not meant to be fetched directly from a browser in the
+current Phase 1 design — the backend proxies or signs with the internal address. Exposing
+9000 to the host would imply it is a first-class public interface, which it is not. Developers
+who need to inspect bucket contents can use the MinIO Console on port 9001.
+
+What future contributors should understand:
+
+If you add a new long-running service, give it a `healthcheck:` directive. If it depends on
+the database, use `condition: service_healthy`, not a bare service name. If you add a new
+one-shot init container, depend on it with `condition: service_completed_successfully`.
+
+The `/health` endpoint on the backend (`GET /api/v1/health`) is the single source of truth
+for backend readiness. Do not use `curl http://localhost:8000/` — the root path is not
+guaranteed to return 200.
