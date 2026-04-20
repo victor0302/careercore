@@ -3600,3 +3600,68 @@ If you add a fourth dependency check to the health endpoint (e.g. Celery broker)
 The `health_client` fixture does not stub `_get_redis` (the dependency used by rate limiters).
 This is intentional — the health endpoint does not use that dependency. Do not add rate
 limiting to the health endpoint; monitoring systems must always be able to reach it.
+
+### 12.40 Issue #47 — Document complete environment configuration and startup requirements
+
+The `.env.example` file is the developer-facing contract for which environment variables
+the application needs. Before this PR, seven variables declared in `config.py` had no
+corresponding entry in `.env.example`, meaning a developer cloning the repo and copying
+the example file would get a silent startup failure or unexpected default behavior.
+
+What changed:
+
+**`.env.example`** — the only file modified.
+
+Seven missing variables were added:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AI_HAIKU_MODEL` | `claude-haiku-4-5-20251001` | Claude model ID for fast/cheap tasks |
+| `AI_SONNET_MODEL` | `claude-sonnet-4-6` | Claude model ID for quality-sensitive tasks |
+| `AI_MODEL_PRICING_JSON` | (built-in dict) | Per-model USD/million-token cost override |
+| `AI_ANALYZE_RATE_LIMIT_REQUESTS` | `5` | Max parse requests per user per window |
+| `AI_ANALYZE_RATE_LIMIT_WINDOW_SECONDS` | `3600` | Sliding window length for analyze limit |
+| `AI_GENERATE_RATE_LIMIT_REQUESTS` | `10` | Max generate requests per user per window |
+| `AI_GENERATE_RATE_LIMIT_WINDOW_SECONDS` | `3600` | Sliding window length for generate limit |
+
+Every entry in `.env.example` was also given an expanded comment explaining:
+- The purpose of the variable
+- Valid values or format (where non-obvious)
+- Whether it is **REQUIRED** (causes startup failure if absent) or optional with a safe default
+
+Why no code changes to `config.py`?
+
+Pydantic Settings already provides fail-fast behavior. Any field declared without a
+default (e.g. `DATABASE_URL: str`, `JWT_SECRET_KEY: str`) raises a `ValidationError` at
+`Settings()` instantiation listing every missing field by name. This was verified
+experimentally: running `Settings()` with all eight required vars unset produced:
+
+```
+ValidationError: 8 validation errors for Settings
+DATABASE_URL — Field required
+REDIS_URL — Field required
+...
+```
+
+The eight required fields are: `DATABASE_URL`, `REDIS_URL`, `MINIO_ENDPOINT`,
+`MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`,
+`JWT_SECRET_KEY`. All have always been required — the only gap was documentation.
+
+Why `.gitignore` was not changed?
+
+`.env` was already listed (line 2). `.env.example` was not listed (correct — it should
+be committed). Both were verified before any changes were made.
+
+Why `AI_MODEL_PRICING_JSON` is commented out in `.env.example`?
+
+The field uses `validation_alias="AI_MODEL_PRICING_JSON"` and a `default_factory` that
+returns a hardcoded pricing dict. It is a valid override but most developers will never
+need to set it. The example file shows the format in a comment rather than providing an
+active default value that could mislead users into thinking it must be set.
+
+What future contributors should understand:
+
+Any time you add a field to `Settings` in `config.py`, add a corresponding line to
+`.env.example` in the appropriate section. If the field is required (no default), mark
+it `REQUIRED` in the comment. If it is optional, show the default value as the example
+value so readers know what they get without setting it.
