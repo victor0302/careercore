@@ -114,14 +114,33 @@ async def client(db: AsyncSession) -> AsyncGenerator[AsyncClient, None]:  # type
     async def _stub_sw_oldest_ms(redis, key: str) -> float:
         return 0.0
 
+    # Budget cache stubs for AICostService — always miss so DB path is exercised;
+    # write and delete are no-ops so no real Redis is needed.
+    import app.services.ai_cost_service as acs_module
+
+    async def _stub_budget_read(redis, key: str) -> None:
+        return None
+
+    async def _stub_budget_write(redis, key: str, tokens: int, ttl: int) -> None:
+        pass
+
+    async def _stub_budget_delete(redis, key: str) -> None:
+        pass
+
     original_incr = rl_module._increment_counter
     original_ttl = rl_module._get_ttl
     original_sw_record = rl_module._sw_record
     original_sw_oldest_ms = rl_module._sw_oldest_ms
+    original_budget_read = acs_module._budget_cache_read
+    original_budget_write = acs_module._budget_cache_write
+    original_budget_delete = acs_module._budget_cache_delete
     rl_module._increment_counter = _stub_increment  # type: ignore[assignment]
     rl_module._get_ttl = _stub_ttl  # type: ignore[assignment]
     rl_module._sw_record = _stub_sw_record  # type: ignore[assignment]
     rl_module._sw_oldest_ms = _stub_sw_oldest_ms  # type: ignore[assignment]
+    acs_module._budget_cache_read = _stub_budget_read  # type: ignore[assignment]
+    acs_module._budget_cache_write = _stub_budget_write  # type: ignore[assignment]
+    acs_module._budget_cache_delete = _stub_budget_delete  # type: ignore[assignment]
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
@@ -130,6 +149,9 @@ async def client(db: AsyncSession) -> AsyncGenerator[AsyncClient, None]:  # type
     rl_module._get_ttl = original_ttl  # type: ignore[assignment]
     rl_module._sw_record = original_sw_record  # type: ignore[assignment]
     rl_module._sw_oldest_ms = original_sw_oldest_ms  # type: ignore[assignment]
+    acs_module._budget_cache_read = original_budget_read  # type: ignore[assignment]
+    acs_module._budget_cache_write = original_budget_write  # type: ignore[assignment]
+    acs_module._budget_cache_delete = original_budget_delete  # type: ignore[assignment]
     app.dependency_overrides.clear()
 
 

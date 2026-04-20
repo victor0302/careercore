@@ -142,10 +142,7 @@ async def parse_job(
     ai: AIProvider = Depends(get_ai_provider),
     _rl: None = Depends(_parse_rate_limiter),
 ) -> JobDescriptionRead:
-    """Trigger AI parsing of a job description.
-
-    TODO: Wire up AICostService budget check before parsing.
-    """
+    """Trigger AI parsing of a job description."""
     service = JobService(db, ai)
     try:
         job = await service.parse(current_user.id, job_id)
