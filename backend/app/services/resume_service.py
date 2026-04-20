@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.provider import AIProvider
 from app.ai.schemas import BulletContext, JobRequirementItem
 from app.models.ai_call_log import AICallType
+from app.models.job_description import JobDescription
 from app.models.job_requirement import JobRequirement
 from app.models.profile import Profile
 from app.models.project import Project
@@ -31,10 +32,17 @@ class ResumeService:
         self._ai = ai_provider
 
     async def create(self, user_id: uuid.UUID, data: ResumeCreate) -> Resume:
-        """Create a new empty resume for a user, optionally tied to a job.
+        """Create a new empty resume for a user, optionally tied to a job."""
+        if data.job_id is not None:
+            result = await self._db.execute(
+                select(JobDescription).where(
+                    JobDescription.id == data.job_id,
+                    JobDescription.user_id == user_id,
+                )
+            )
+            if result.scalar_one_or_none() is None:
+                raise ValueError("Job not found.")
 
-        TODO: Validate that the job_id belongs to the user if provided.
-        """
         resume = Resume(user_id=user_id, job_id=data.job_id)
         self._db.add(resume)
         await self._db.flush()
