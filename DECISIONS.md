@@ -1275,3 +1275,48 @@ Mocking strategy:
   the test immediately rather than silently breaking monitoring integrations.
 - The `health_client` fixture is self-contained and does not affect the shared `client`
   fixture or any other test in the suite.
+
+---
+
+## ADR-045 — .env.example as the authoritative environment contract
+
+**Date:** 2026-04-20 (PR #109, issue #47)  
+**Status:** Accepted
+
+**Context:**  
+Seven variables declared in `config.py` (`AI_HAIKU_MODEL`, `AI_SONNET_MODEL`,
+`AI_MODEL_PRICING_JSON`, and four AI rate-limit settings) had no entry in `.env.example`.
+A developer cloning the repo and copying the example file would receive a stack with
+undocumented runtime behavior for those settings.
+
+**Decision:**  
+`.env.example` is the single source of truth for the environment contract. Every field in
+`Settings` (pydantic-settings) must have a corresponding entry. The rule:
+
+- Required fields (no default) → present with a placeholder value and a `# REQUIRED` comment.
+- Optional fields with defaults → present with the default as the value, comment explains
+  the purpose and valid values.
+- Complex / rarely-needed overrides (e.g. `AI_MODEL_PRICING_JSON`) → commented out with
+  the format shown in the comment body.
+
+No CI enforcement was added at this time. The convention is maintained by code review:
+any PR that adds a `Settings` field must update `.env.example`.
+
+**Why not fail-fast on model name fields?**  
+`AI_HAIKU_MODEL` and `AI_SONNET_MODEL` have safe hardcoded defaults that track the current
+recommended models. Making them required would force every developer to set them even though
+the defaults are production-appropriate. They are documented so operators can pin to a
+specific version without a code change.
+
+**Why is `AI_MODEL_PRICING_JSON` commented out?**  
+It uses a `default_factory` and `validation_alias`. Most deployments will use the built-in
+pricing dict. Providing an active default value in `.env.example` would suggest it must be
+set; a commented-out example with the format in the comment is less misleading.
+
+**Consequences:**  
+- New developers get a fully working local stack by copying `.env.example` to `.env`
+  with no additional research.
+- The eight truly required variables are explicitly labeled so operators know exactly
+  what will cause a startup `ValidationError`.
+- Future `config.py` additions must be accompanied by a `.env.example` update or the PR
+  should be blocked in review.
