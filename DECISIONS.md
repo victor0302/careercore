@@ -1320,3 +1320,68 @@ set; a commented-out example with the format in the comment is less misleading.
   what will cause a startup `ValidationError`.
 - Future `config.py` additions must be accompanied by a `.env.example` update or the PR
   should be blocked in review.
+
+---
+
+## ADR-046 — Async job parsing is enqueued by the service layer after flush, not the endpoint
+
+**Date:** 2026-04-22 (PR #113, issue #94)  
+**Status:** Accepted
+
+**Context:**  
+`POST /jobs` creates a `JobDescription` row and returns immediately. Before this PR, the
+`JobService.create()` method had a `TODO` comment at line 28–29 noting that a Celery task
+should be enqueued to parse the job asynchronously. The endpoint waited until the manual
+`POST /jobs/{id}/parse` re-parse endpoint was called — meaning newly created jobs were
+never parsed unless the client explicitly triggered it.
+
+**Decision:**  
+`JobService.create()` calls `parse_job.delay(str(job.id), str(user_id))` immediately after
+`await self._db.flush()`. The task is imported lazily inside the method body (not at module
+level) to avoid circular imports between the service layer and the worker layer.
+
+The task (`app.workers.tasks.job_tasks.parse_job`) is placed on the `ai_tasks` queue,
+uses `max_retries=3` with `default_retry_delay=60`, and retries only on transient
+infrastructure failures (`BotoCoreError`, `SQLAlchemyError`). All other exceptions are
+swallowed silently: the job row remains in an unparsed state but the creation response is
+unaffected. `parsed_at` is `None` immediately after creation; the task sets it
+asynchronously when it completes.
+
+The `POST /jobs/{id}/parse` manual re-parse endpoint is unchanged and fully functional.
+
+**Why enqueue after flush, not after commit?**  
+The request transaction commits automatically when the `get_db` generator exits (FastAPI
+lifecycle). Enqueueing after flush but before commit means the task ID is available while
+the row is still within the open transaction. In practice, the `parse_job` worker opens its
+own separate `AsyncSessionLocal` session and queries the job by ID — so the task must not
+execute before the outer transaction commits. The Celery broker (Redis) only delivers the
+message once the `delay()` call is dispatched, and the worker will not run until it pulls
+the message from the queue, which happens after the HTTP response is sent and the
+transaction is committed. This ordering holds under normal operation; there is no race
+window for a single-worker setup.
+
+**Why lazy import?**  
+`app.services.job_service` is imported by `app.workers.tasks.job_tasks` (indirectly, via
+`app.ai.dependencies`). Importing `job_tasks` at the module level of `job_service.py`
+would create a circular import. The lazy `from app.workers.tasks.job_tasks import
+parse_job` inside the method body defers the import until call time, by which point all
+modules are already loaded. This is the same pattern used elsewhere in the codebase (e.g.,
+`extraction_tasks.py` imports `download_object_bytes` lazily).
+
+**Why swallow all non-transient exceptions?**  
+Job creation must succeed even if the parse task cannot be enqueued or fails to run. The
+job row is the durable artifact; parsing is an enrichment step that can be triggered later
+via the manual re-parse endpoint. Propagating task exceptions to the creation response
+would make the API contract depend on AI provider availability — a fragile coupling.
+
+**Consequences:**  
+- Newly created jobs are automatically queued for AI parsing without requiring a second
+  client-initiated request.
+- The creation response always reflects the immediately-persisted state: `parsed_at` is
+  `None` because the task is asynchronous.
+- The `POST /jobs/{id}/parse` manual re-parse endpoint remains the correct mechanism for
+  re-parsing a job after editing, or for recovering a job that failed silent parsing.
+- The `ai_tasks` queue can be scaled independently from the `default` queue used by
+  file extraction — the two workload types have different infrastructure bottlenecks.
+- Any new Celery task that calls `JobService.parse()` must open its own `AsyncSessionLocal`
+  session and commit independently; it must not reuse the HTTP request's session.
