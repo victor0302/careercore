@@ -1385,3 +1385,96 @@ would make the API contract depend on AI provider availability — a fragile cou
   file extraction — the two workload types have different infrastructure bottlenecks.
 - Any new Celery task that calls `JobService.parse()` must open its own `AsyncSessionLocal`
   session and commit independently; it must not reuse the HTTP request's session.
+
+---
+
+## ADR-047 — Non-editable pip install in multi-stage Docker builds
+
+**Date:** 2026-04-22 (PR #116, issue #46)  
+**Status:** Accepted
+
+**Context:**  
+The backend `Dockerfile` used `pip install --no-cache-dir --prefix=/install -e "."` to
+install the application package into a prefix directory that is then copied into the final
+stage. An editable install records a `.pth` pointer to the source directory (the builder
+`WORKDIR`, `/build`) rather than copying the source files into site-packages. In a
+multi-stage build the final stage copies `/install` but not `/build`, so the `.pth` pointer
+is a broken reference. On container startup, `import app` raises `ImportError` because
+Python follows the `.pth` file and finds nothing at `/build`.
+
+The `COPY app/ app/` instruction was also placed after the `pip install` line, which meant
+pip could not see the source tree during the install step regardless of install mode.
+
+**Decision:**  
+1. Move `COPY app/ app/` before the `pip install` line so the source tree is present when
+   setuptools inspects the package.
+2. Replace `-e "."` with `.` (non-editable). A non-editable install copies all source files
+   into `/install/lib/python3.12/site-packages/`, which survives the multi-stage copy
+   intact.
+3. Remove the redundant `COPY --from=builder /build/app /app/app` from the final stage —
+   with a non-editable install the source is already in site-packages.
+
+**Consequences:**  
+- The application starts without `ImportError` in the final Docker image.
+- Layer caching is slightly less granular: because source must be present before install,
+  any source change invalidates the pip install layer. This is the standard trade-off for
+  a non-editable multi-stage build.
+- Any future Dockerfile that installs a local Python package with `--prefix` must use
+  non-editable install mode.
+
+---
+
+## ADR-048 — Profile workspace: single-file component with per-section CRUD and TanStack Query v5 patterns
+
+**Date:** 2026-04-22 (PR #117, issue #103)  
+**Status:** Accepted
+
+**Context:**  
+`frontend/src/app/profile/page.tsx` was a stub with a sprint-2 TODO. The backend exposes
+five profile-related resource groups, each with full GET / POST / PATCH / DELETE endpoints.
+The frontend needed a working workspace covering all five groups. Two type-drift bugs were
+also present in `frontend/src/types/index.ts`.
+
+**Decision:**  
+Implement the entire profile workspace as a single `page.tsx` file containing five
+section-level React components (`BasicInfoSection`, `WorkExperienceSection`,
+`ProjectsSection`, `SkillsSection`, `CertificationsSection`) and a `ProfilePage` root.
+
+Key choices within the implementation:
+
+*TanStack Query v5 form-sync pattern:* `useQuery` in v5 does not support `onSuccess`.
+Form state is initialised from query data via `useEffect([data])`. `useMutation` retains
+`onSuccess` / `onError` callbacks, which are used for cache updates and error display.
+
+*Cache invalidation:* `queryClient.invalidateQueries({ queryKey: [...] })` with the
+object-param syntax required by v5. List queries are namespaced as `["profile", entity]`
+so invalidating one section does not refetch the others.
+
+*`renderForm()` pattern:* Each section defines a `renderForm()` function (not a
+sub-component) that returns the shared form JSX used for both the inline add position
+(above the list) and the inline edit position (replacing the row content). This avoids
+prop drilling while keeping the add and edit cases in one place.
+
+*Inline edit, not modal:* Clicking "Edit" on a row sets `editingId` state, which replaces
+the row content with the edit form. Only one form (add or edit) is active at a time; the
+`startEdit` handler calls `setShowAdd(false)` and vice versa.
+
+*Single file:* All five section components live in `page.tsx`. Extracting them to separate
+files would provide no architectural benefit at this scale and would fragment a tightly
+coupled feature into five files that always change together.
+
+*Type drift fixes:* `ProfileUpdate` interface added (was entirely absent); `source_file_id:
+string | null` added to `WorkExperience` (present in the backend `WorkExperienceRead`
+schema but missing from the TypeScript type since the type was first authored).
+
+**Consequences:**  
+- All five profile sections are functional: users can view, create, edit, and delete
+  records in each section without a page reload.
+- `page.tsx` is large (~450 lines) but structurally uniform — each section follows the
+  identical `useQuery + useMutation × 3 + showAdd/editingId state + renderForm()` pattern.
+- Switching tabs unmounts the previous section component, resetting any open form state —
+  intentional behavior.
+- Future additions (AI-suggested tags, drag-to-reorder) should extract individual sections
+  into their own files at that point; no pre-emptive abstraction was added now.
+- The `source_file_id` field on work experience and the AI-populated tag arrays are not
+  editable in the form — they are set only by the extraction pipeline.

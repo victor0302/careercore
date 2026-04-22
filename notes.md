@@ -3752,3 +3752,180 @@ time the task runs.
 
 The `POST /jobs/{id}/parse` manual re-parse endpoint is unchanged and is the correct
 recovery mechanism for jobs stuck in the unparsed state.
+
+---
+
+### 12.42 Issue #46 — Audit and fix backend and frontend Dockerfiles (PR #116)
+
+What we did and why:
+
+Both multi-stage Dockerfiles had correctness bugs that would cause the production images to
+fail silently or raise import errors on startup.
+
+**Backend (`backend/Dockerfile`) — editable install bug:**
+
+The original `pip install -e "."` used the `--prefix=/install` flag. An editable install
+does not copy source files into `site-packages` — instead, it writes a `.pth` file that
+adds the source directory (the builder's `WORKDIR`, `/build`) to `sys.path`. In the
+multi-stage build, the final stage copies `/install` from the builder but does not copy
+`/build`. When `uvicorn` starts and Python processes the `.pth` file, the path `/build`
+does not exist, so `import app` raises `ImportError` immediately.
+
+The fix is two-part:
+1. Move `COPY app/ app/` before the `pip install` line so setuptools can see the source
+   tree during the build step.
+2. Replace `-e "."` with `.` (non-editable) so pip copies all source files into
+   `/install/lib/python3.12/site-packages/` — a path that does exist in the final stage
+   because the final stage copies the entire `/install` tree with `COPY --from=builder
+   /install /usr/local`.
+
+The redundant `COPY --from=builder /build/app /app/app` that was present in some earlier
+iterations of the file was also removed — with a non-editable install the source files
+live in site-packages, not in `/app`.
+
+**Frontend (`frontend/Dockerfile`) — missing `--chown` on public assets:**
+
+The runner stage creates a non-root user `nextjs` (uid 1001, group `nodejs`) and runs as
+that user. The two `.next/` COPY commands already had `--chown=nextjs:nodejs`. The `public/`
+COPY was missing it, so the directory was owned by root. At runtime, if Next.js or any
+middleware needs to serve or write anything in `public/`, it would encounter a permission
+denied error.
+
+The fix is adding `--chown=nextjs:nodejs` to the `COPY --from=builder /app/public ./public`
+line, consistent with the two copies that follow it.
+
+No other changes were needed: `next.config.ts` already has `output: "standalone"` so the
+`node server.js` CMD is correct. The `next.config.ts` `experimental.outputFileTracingIncludes`
+and `experimental.outputFileTracingExcludes` settings remain unchanged.
+
+Real issues encountered:
+
+Both bugs were latent and would not surface during local `npm run dev` / `uvicorn --reload`
+development because those workflows do not use Docker. They would surface on first deployment
+or CI image build that ran the final stage. The editable install bug is particularly
+insidious because the error only appears at container startup, not at image build time.
+
+What future contributors should understand:
+
+In a multi-stage Docker build, never use `pip install -e` with `--prefix` — the editable
+install's `.pth` pointer survives the copy but the source directory it points to does not.
+Always use non-editable installs for multi-stage builds.
+
+Always apply `--chown=<user>:<group>` to every `COPY` in a stage that runs as a non-root
+user, not just to files that are obviously "code". Static assets and configuration files
+may also need to be read or written by the application process.
+
+---
+
+### 12.43 Issue #103 — Profile workspace: full CRUD for all five sections (PR #117)
+
+What we did and why:
+
+`frontend/src/app/profile/page.tsx` was a placeholder stub with a sprint-2 TODO comment.
+This PR replaced it with a working profile workspace covering all five backend-backed
+sections: basic info, work experience, projects, skills, and certifications.
+
+**Type drift fixes (`frontend/src/types/index.ts`):**
+
+Two discrepancies were found between the backend Pydantic schemas and the TypeScript types:
+
+1. `WorkExperience` was missing `source_file_id: string | null`. The field exists in
+   `WorkExperienceRead` (backend) and is returned in every list response. Without it the
+   TypeScript type was incomplete and callers could not reference the field.
+
+2. `ProfileUpdate` did not exist at all. The backend `ProfileUpdate` schema has four
+   optional nullable fields (`display_name`, `current_title`, `target_domain`,
+   `summary_notes`). The type was needed to type the PATCH body. Added as a new exported
+   interface.
+
+**BasicInfoSection:**
+
+Fetches `GET /api/v1/profile` via `useQuery`. Uses `useEffect` to sync the query data into
+four controlled `useState` fields when the query result arrives. This is the correct
+TanStack Query v5 pattern — `useQuery` dropped its `onSuccess` callback in v5, so the
+`useEffect([profile])` dependency is the idiomatic replacement.
+
+On submit, calls `PATCH /api/v1/profile` via `useMutation`. On success, updates the query
+cache directly with `queryClient.setQueryData(["profile"], data)` — avoiding a redundant
+round-trip — and shows a 2-second "Profile saved." confirmation banner.
+
+The completeness percentage is displayed as a pill badge sourced from
+`profile.completeness_pct`. This keeps the completeness signal visible without a separate
+fetch.
+
+**Tab navigation:**
+
+A simple `useState<Tab>` in the root `ProfilePage` component drives which section is
+mounted. No external tab library was needed — the four tabs are rendered as `<button>`
+elements with a bottom-border active indicator using Tailwind classes. Switching tabs
+unmounts the previous section component, which has the side effect of resetting any open
+add/edit form in that section — desirable behavior.
+
+**Per-section CRUD pattern (WorkExperience, Projects, Skills, Certifications):**
+
+Each section component is self-contained. The shared pattern across all four sections:
+
+- `useQuery` for the list with a namespaced query key (`["profile", "experience"]`, etc.)
+- `useMutation` for add (`POST /api/v1/profile/{entity}`)
+- `useMutation` for edit (`PATCH /api/v1/profile/{entity}/{id}`)
+- `useMutation` for delete (`DELETE /api/v1/profile/{entity}/{id}`)
+- `queryClient.invalidateQueries({ queryKey: [...] })` on every mutation success (v5
+  object-param syntax — v4's positional array argument does not work in v5)
+- `showAdd: boolean` state to toggle the inline add form at the top of the list
+- `editingId: string | null` state to toggle the inline edit form within a list row
+- `renderForm()` function returning the shared form JSX used for both add and edit contexts
+- `cancelForm()` that resets both flags and clears form state
+
+The `renderForm()` approach — a function that returns JSX rather than a sub-component —
+avoids prop drilling `form`, `setForm`, `handleSubmit`, `error`, etc. down one level while
+still keeping the form reusable in two positions (top-of-list add, inline-row edit).
+
+**Why not split into separate component files?**
+
+The four section components share identical structural patterns. Keeping them in a single
+file makes the relationship immediately visible and avoids a proliferation of small
+component files for what is essentially repeated form logic. If the sections grow
+significantly (e.g., adding drag-to-reorder or AI-suggested tags), they can be extracted
+at that point without rework.
+
+**API path mapping:**
+
+```
+GET/PATCH   /api/v1/profile                         → BasicInfoSection
+GET/POST    /api/v1/profile/experience               → WorkExperienceSection
+PATCH/DEL   /api/v1/profile/experience/{id}
+GET/POST    /api/v1/profile/projects                 → ProjectsSection
+PATCH/DEL   /api/v1/profile/projects/{id}
+GET/POST    /api/v1/profile/skills                   → SkillsSection
+PATCH/DEL   /api/v1/profile/skills/{id}
+GET/POST    /api/v1/profile/certifications           → CertificationsSection
+PATCH/DEL   /api/v1/profile/certifications/{id}
+```
+
+**Form field coverage:**
+
+Only the fields present in the `*Create` schemas are exposed in the add form. Fields
+populated by AI extraction (`bullets`, `skill_tags`, `tool_tags`, `domain_tags`) are
+display-only (not yet shown — they render only after the extraction pipeline runs). The
+`source_file_id` on work experience is not exposed in the form — it is set only by the
+file extraction pipeline, never by manual entry.
+
+Real issues encountered:
+
+TanStack Query v5 silently ignores unrecognized options on `useQuery` (including
+`onSuccess`), which means using the v4 pattern compiles and runs without errors but the
+callback never fires. The `useEffect` pattern is the correct fix and is also more
+predictable when the component remounts.
+
+What future contributors should understand:
+
+All five profile endpoints require authentication (the `api.get/post/patch/delete` helpers
+attach the Bearer token automatically via the `@/lib/api` wrapper). An unauthenticated
+visit to `/profile` will receive 401s and show error banners — this is correct behavior;
+the auth middleware should redirect to `/auth/login` before the page mounts.
+
+When adding new fields to any `*Create` or `*Update` backend schema, the corresponding
+`frontend/src/types/index.ts` interface must be updated in the same PR to prevent silent
+type drift. The `ProfileUpdate` interface was absent for an entire sprint because there
+was no enforcement mechanism — consider adding a type-check test or a lint rule as a
+follow-up.
