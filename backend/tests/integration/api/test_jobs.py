@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from sqlalchemy import select
 
@@ -277,3 +278,25 @@ async def test_job_detail_includes_latest_analysis_evidence_and_requirements(
             "suggested_action": "Build one production deployment project using Kubernetes.",
         }
     ]
+
+
+async def test_create_job_enqueues_celery_parse_task(client, mock_user, db) -> None:
+    headers = await _login(client, mock_user.email, "testpassword123")
+
+    with patch("app.workers.tasks.job_tasks.parse_job.delay") as mock_delay:
+        response = await client.post(
+            "/api/v1/jobs",
+            headers=headers,
+            json={
+                "title": "Backend Engineer",
+                "company": "Acme",
+                "raw_text": "Build and scale backend services.",
+            },
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    job_id = payload["id"]
+    user_id = str(mock_user.id)
+
+    mock_delay.assert_called_once_with(job_id, user_id)

@@ -12,6 +12,7 @@ celery_app = Celery(
     backend=settings.CELERY_RESULT_BACKEND,
     include=[
         "app.workers.tasks.extraction_tasks",
+        "app.workers.tasks.job_tasks",
     ],
 )
 

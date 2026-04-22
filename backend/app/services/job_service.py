@@ -23,11 +23,7 @@ class JobService:
         self._ai = ai_provider
 
     async def create(self, user_id: uuid.UUID, data: JobDescriptionCreate) -> JobDescription:
-        """Persist a new job description. Does not trigger parsing immediately.
-
-        TODO: Enqueue a Celery task to parse the JD asynchronously and update
-        parsed_at once complete.
-        """
+        """Persist a new job description and enqueue async parsing."""
         job = JobDescription(
             user_id=user_id,
             title=data.title,
@@ -36,6 +32,9 @@ class JobService:
         )
         self._db.add(job)
         await self._db.flush()
+        from app.workers.tasks.job_tasks import parse_job
+
+        parse_job.delay(str(job.id), str(user_id))
         return job
 
     async def list_for_user(self, user_id: uuid.UUID) -> list[JobDescription]:
