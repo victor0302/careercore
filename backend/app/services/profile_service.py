@@ -40,10 +40,7 @@ class ProfileService:
         self._db = db
 
     async def get_or_create(self, user_id: uuid.UUID) -> Profile:
-        """Return the profile for a user, creating it if it does not exist.
-
-        TODO: After creation, trigger a completeness_pct recalculation.
-        """
+        """Return the profile for a user, creating it if it does not exist."""
         result = await self._db.execute(
             select(Profile)
             .where(Profile.user_id == user_id)
@@ -62,10 +59,7 @@ class ProfileService:
         return profile
 
     async def update(self, user_id: uuid.UUID, data: ProfileUpdate) -> Profile:
-        """Apply partial updates to the user's profile.
-
-        TODO: After update, recalculate completeness_pct and save.
-        """
+        """Apply partial updates to the user's profile."""
         profile = await self.get_or_create(user_id)
         for field, value in data.model_dump(exclude_none=True).items():
             setattr(profile, field, value)
@@ -84,7 +78,6 @@ class ProfileService:
           - At least 1 project: 15 pts
           - At least 1 certification: 10 pts
 
-        TODO: Implement this calculation and call it whenever child entities change.
         """
         section_presence = {
             model: await self._has_related_rows(model, profile.id)
