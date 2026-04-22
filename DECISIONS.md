@@ -1320,3 +1320,57 @@ set; a commented-out example with the format in the comment is less misleading.
   what will cause a startup `ValidationError`.
 - Future `config.py` additions must be accompanied by a `.env.example` update or the PR
   should be blocked in review.
+
+---
+
+## ADR-046 — Ownership integration suite uses two real users, not mocks
+
+**Date:** 2026-04-22 (PR #114, issue #40)  
+**Status:** Accepted
+
+**Context:**  
+Phase 1 accumulated service-layer unit tests for ownership (e.g.
+`test_file_service_ownership.py`, `test_resume_service_ownership.py`) and
+endpoint-level tests scattered across individual resource test files. No single
+file proved, end-to-end over HTTP, that every Phase 1 resource type rejects
+cross-user reads and mutations. The gap meant it was possible to break ownership
+on a new entity and not detect it until a targeted security review.
+
+**Decision:**  
+- A dedicated integration test file
+  `backend/tests/integration/api/test_ownership_suite.py` covers every Phase 1
+  resource type with at least a read and a mutating operation performed by user
+  B on a resource owned by user A.
+- Both users are created as real database rows (hashed password, `is_active=True`)
+  using the shared `db` and `client` fixtures from `conftest.py`. No
+  `get_current_user` override or mock user object is used; both users log in
+  through `POST /auth/login` to obtain real JWT tokens.
+- A module-level `_make_user(db, email)` factory DRYs up user creation. A
+  module-level `_login(client, email, password)` helper follows the same shape
+  as every other test file in the same directory.
+- The file exercises these entity types: files, jobs, work experience, skills,
+  projects, certifications, resumes, resume versions, and resume bullets.
+- Expected outcomes per cross-user attempt:
+  - Profile sub-entity mutations (PATCH/DELETE on another user's work experience,
+    skill, project, or certification) → `403 Forbidden` with `"Forbidden."`.
+  - All other cross-user reads and mutations → `404 Not Found`.
+- For `GET /files/{id}/url`, `FileService.get_presigned_url` is monkeypatched to
+  raise `AssertionError` if called, proving that presigned URL generation is
+  never triggered for a cross-user request (ownership is enforced before the
+  MinIO call path is reached).
+
+**Consequences:**  
+- Every Phase 1 entity type now has explicit HTTP-layer cross-user coverage in
+  one canonical location; a future regression anywhere in the ownership chain
+  (service layer, endpoint, or dependency injection) surfaces in this suite.
+- Tests run against PostgreSQL in CI (same as all other integration tests that
+  touch JSONB tables); they are not runnable against SQLite in-memory because
+  `Base.metadata.create_all` cannot compile JSONB columns for SQLite.
+- The 403 vs. 404 distinction is intentional and preserved: profile sub-entities
+  use `get_child_entity_access` which detects "exists but belongs to another
+  profile" and returns 403; file, job, resume, version, and bullet endpoints
+  collapse both "missing" and "foreign-owned" into 404, consistent with ADR-020
+  and ADR-037.
+- Not duplicated here: profile root GET/PATCH (`test_profile_ownership.py`),
+  resume create with cross-user `job_id` (`test_resume_job_ownership.py`), and
+  job list/detail ownership check (`test_jobs.py`).

@@ -3665,3 +3665,102 @@ Any time you add a field to `Settings` in `config.py`, add a corresponding line 
 `.env.example` in the appropriate section. If the field is required (no default), mark
 it `REQUIRED` in the comment. If it is optional, show the default value as the example
 value so readers know what they get without setting it.
+
+---
+
+### 12.41 Issue #40 — Cross-user ownership enforcement integration suite (PR #114)
+
+The project had service-level unit tests for ownership (per-service
+`get_for_user` double-filter tests) and scattered endpoint ownership assertions
+in individual resource test files. What was missing was a single file that said,
+plainly: "user B cannot read or mutate any resource owned by user A — here is
+the HTTP-level proof for every entity type in Phase 1."
+
+#### What was added
+
+One new file: `backend/tests/integration/api/test_ownership_suite.py`.
+
+13 tests covering 9 Phase 1 entity types:
+
+| Entity | Tested operation(s) | Expected status |
+|--------|---------------------|-----------------|
+| Files | GET `/files/{id}/url` | 404 |
+| Jobs | POST `/jobs/{id}/parse` | 404 |
+| Work experience | GET list, PATCH `/{id}`, DELETE `/{id}` | `[]`, 403, 403 |
+| Skills | GET list, PATCH `/{id}`, DELETE `/{id}` | `[]`, 403, 403 |
+| Projects | GET list, PATCH `/{id}`, DELETE `/{id}` | `[]`, 403, 403 |
+| Certifications | GET list, PATCH `/{id}`, DELETE `/{id}` | `[]`, 403, 403 |
+| Resumes | GET `/resumes/{id}` | 404 |
+| Resume versions | GET `/resumes/versions/{vid}` | 404 |
+| Resume bullets | PATCH `/{rid}/bullets/{bid}/approve`, DELETE `/{rid}/bullets/{bid}` | 404, 404 |
+
+#### Why two real users instead of a mock?
+
+All other ownership-adjacent test files either use `mock_user` (a real DB row)
+as the authenticated party and override `get_current_user` to skip login, or
+they mock the service layer entirely. The new suite uses two real users who each
+log in through `POST /auth/login` to obtain JWT tokens.
+
+The reason is scope: mocking `get_current_user` skips the authentication
+middleware, which is correct when you are testing a service-layer concern. But
+the ownership suite is proving the full HTTP contract — that authentication,
+authorization, and service-layer ownership enforcement all compose correctly. If
+any link in that chain is broken (e.g., a wrong DI override in a future
+endpoint, a missing `user_id` filter, or a misrouted request), the test catches
+it. A mocked user identity can mask precisely those composition failures.
+
+The tradeoff is slightly more test setup per function (two `_make_user` calls,
+two `_login` calls). This is intentional: each test is self-contained and
+creates only what it needs. There is no shared state between tests.
+
+#### Why 403 for profile sub-entities and 404 for everything else?
+
+This is the existing service contract, not a new decision. Profile sub-entities
+(`WorkExperience`, `Skill`, `Project`, `Certification`) are accessed through
+`ProfileService.get_child_entity_access`, which distinguishes between "the ID
+does not exist anywhere" (404) and "the ID exists but belongs to another user's
+profile" (403). That distinction is documented in ADR-030 and tested here.
+
+All other resource types collapse "missing or foreign-owned" into a single 404.
+The rationale for the collapse is in ADR-020 (files), ADR-037 (bullets), and the
+`JobService.get_for_user` and `ResumeService.get_for_user` double-filter pattern
+(ADR-013): the service returns `None` for both cases, and the endpoint maps
+`None → 404`. The client does not need to know whether a UUID belongs to someone
+else or simply does not exist.
+
+#### Why monkeypatch `FileService.get_presigned_url` in the file test?
+
+`FileService.get_download_url_for_user` short-circuits: if `get_for_user`
+returns `None` (wrong owner), the presigned URL path is never reached. The
+monkeypatch makes this invariant explicit and loud: if the ownership check were
+broken and the code reached `get_presigned_url`, the test would fail with a
+clear `AssertionError` rather than a boto3/MinIO network error.
+
+This follows the pattern established in `test_files.py` (PR #20 / ADR-036),
+where the file download contract tests deliberately avoid depending on
+object-storage infrastructure.
+
+#### Why is `POST /jobs/{id}/parse` included but not `GET /jobs/{id}`?
+
+`GET /jobs/{id}` ownership is already covered in `test_jobs.py` (in the
+"do not duplicate" list from the issue spec). The parse endpoint was not covered
+in any existing cross-user test. `JobService.parse` enforces ownership with the
+same double-filter (`JobDescription.id == job_id, JobDescription.user_id ==
+user_id`) before the AI budget check or any provider call — so user B's parse
+attempt returns `404` before any AI cost is incurred or logged.
+
+#### SQLite vs. PostgreSQL
+
+These tests run against PostgreSQL in CI. The `test_engine` session fixture runs
+`Base.metadata.create_all`, which includes JSONB columns on `job_analyses`,
+`work_experiences`, and `projects`. SQLite cannot compile JSONB, so all
+integration tests that import the full metadata (i.e. all tests using the shared
+`db`/`client` fixtures) require PostgreSQL. This is expected behavior per
+ADR-014 and the CI workflow (`DATABASE_URL` is set to the PostgreSQL service
+URL; the SQLite default is only used when no `DATABASE_URL` is provided).
+
+#### Not duplicated here
+
+- Profile root GET/PATCH: `test_profile_ownership.py`
+- Resume create with cross-user `job_id`: `test_resume_job_ownership.py`
+- Job list/detail cross-user access: `test_jobs.py`
