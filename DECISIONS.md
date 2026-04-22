@@ -1385,3 +1385,60 @@ would make the API contract depend on AI provider availability — a fragile cou
   file extraction — the two workload types have different infrastructure bottlenecks.
 - Any new Celery task that calls `JobService.parse()` must open its own `AsyncSessionLocal`
   session and commit independently; it must not reuse the HTTP request's session.
+
+---
+
+## ADR-047 — Dockerfile strategy: multi-stage non-root production, single-stage dev
+
+**Date:** 2026-04-22 (PR #116, issue #46)  
+**Status:** Accepted
+
+**Context:**  
+The project ships four Dockerfiles across the backend and frontend: production images
+(`Dockerfile`) and development images (`Dockerfile.dev`) for each. These serve different
+purposes and have different requirements around image size, hot-reload, and security.
+A prior audit (issue #46) found two correctness bugs and documented the full strategy.
+
+**Decision:**
+
+| Image | Approach | Key properties |
+|-------|----------|----------------|
+| `backend/Dockerfile` | Multi-stage | Builder stage compiles deps; final stage is slim with no build tools. Non-editable `pip install .` so the `app` package lands in site-packages — no source-tree path dependency in the final image. Non-root `appuser` (uid 1001). `curl` present for healthcheck. |
+| `backend/Dockerfile.dev` | Single-stage | `pip install -e ".[dev]"` installs all dev/test deps and creates an editable link to the WORKDIR. Source is bind-mounted at runtime (`./backend:/app`), so the editable install resolves correctly. `--reload` flag enables hot reload. |
+| `frontend/Dockerfile` | Multi-stage (3 stages) | `deps` stage caches `npm ci`; `builder` stage runs `next build`; `runner` stage copies only the standalone output and static assets. Requires `output: "standalone"` in `next.config.ts`. Non-root `nextjs` user (uid 1001). All COPY commands use `--chown=nextjs:nodejs`. |
+| `frontend/Dockerfile.dev` | Single-stage | `npm ci` pre-installs deps; source and `.next` cache are bind-mounted at runtime. `npm run dev` enables hot reload via Next.js dev server. |
+
+**Why non-editable install in the production backend image?**  
+An editable install (`pip install -e .`) creates a `.pth` file in site-packages containing
+the absolute path to the source directory at build time (`/build`). In a multi-stage build
+the final stage does not inherit the builder filesystem, so `/build` does not exist and
+`import app` raises `ImportError`. A non-editable install copies Python source into
+`site-packages` directly, making the package path-independent.
+
+**Why editable install in the dev image?**  
+The dev container bind-mounts the source directory at the same path as the WORKDIR (`/app`).
+The editable install's `.pth` file points to `/app`, which is exactly where the live source
+lands at runtime. Combined with `--reload`, any file change is picked up without rebuilding
+the image.
+
+**Why `output: "standalone"` for the frontend production image?**  
+Next.js standalone mode emits a self-contained `server.js` and a minimal copy of
+`node_modules` needed at runtime. This makes the production image significantly smaller than
+copying the full `node_modules` tree and avoids the need for `next start`. Without this
+setting, the runner stage's `CMD ["node", "server.js"]` would fail because `server.js` is
+only generated in standalone mode.
+
+**Why non-root users in production images?**  
+If a container process is compromised, running as a non-root user (uid 1001) limits the
+blast radius: the attacker cannot write to system directories, install packages, or escalate
+privileges through setuid binaries. Both production images use uid 1001 (`appuser` /
+`nextjs`) matching the convention established across all CareerCore containers.
+
+**Consequences:**  
+- Production images are minimal: no compiler toolchain, no source tree separate from
+  site-packages, no dev dependencies.
+- Dev images are rebuild-free for code changes: bind mounts + hot reload handle updates.
+- Any new Python package added to `pyproject.toml` requires rebuilding the backend image
+  (both dev and prod) — pip install runs at image build time, not at container start.
+- Any future Dockerfile change must preserve the non-root user, the `--chown` flag on all
+  frontend COPY instructions, and the non-editable install pattern for the backend prod image.
