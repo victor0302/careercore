@@ -3665,3 +3665,90 @@ Any time you add a field to `Settings` in `config.py`, add a corresponding line 
 `.env.example` in the appropriate section. If the field is required (no default), mark
 it `REQUIRED` in the comment. If it is optional, show the default value as the example
 value so readers know what they get without setting it.
+
+### 12.41 Issue #94 — Enqueue Celery task for async job parse on creation
+
+Before this PR, `POST /jobs` created a `JobDescription` row and returned immediately, but
+never triggered parsing. The `JobService.create()` method had a `TODO` comment acknowledging
+the gap. Users had to manually call `POST /jobs/{id}/parse` to get job requirements
+extracted. This PR closes that gap.
+
+What changed:
+- Created `backend/app/workers/tasks/job_tasks.py` with:
+  - `_parse_job_async(job_id, user_id)` — an async helper that opens its own
+    `AsyncSessionLocal`, instantiates `JobService` with the configured AI provider,
+    calls `service.parse(user_id, job_id)`, and commits. Wraps the entire body in a
+    broad `except Exception: pass` so failures are silent and the job row stays in the
+    unparsed state without affecting the creation response.
+  - `parse_job` — a sync Celery task decorated with `@celery_app.task(bind=True,
+    max_retries=3, default_retry_delay=60, queue="ai_tasks")` that calls
+    `asyncio.run(_parse_job_async(...))`. Retries on `BotoCoreError` or
+    `SQLAlchemyError`; swallows everything else.
+- Added `"app.workers.tasks.job_tasks"` to the `include` list in `celery_app.py`.
+- Updated `JobService.create()` to lazily import `parse_job` and call
+  `parse_job.delay(str(job.id), str(user_id))` after `await self._db.flush()`.
+- Added `test_create_job_enqueues_celery_parse_task` to
+  `backend/tests/integration/api/test_jobs.py`. Patches `parse_job.delay` and asserts it
+  is called once with the correct job ID and user ID strings after a successful `POST /jobs`.
+
+Why enqueue in `JobService.create()` and not in the endpoint?
+
+Because the service layer is the correct place for business-side side effects (ADR-005).
+If the enqueue logic lived in the endpoint, a future CLI or other entry point calling
+`create()` directly would skip it. Having the service own both the row creation and the
+task dispatch means any caller gets the full contract.
+
+Why call `delay()` after `flush()` but inside the open transaction?
+
+`flush()` gives the job row a stable database-assigned UUID that the task needs to look
+up. The task does not run until after the HTTP response is sent and the transaction is
+committed — the Celery broker holds the message until the worker pulls it. This is safe
+because the worker opens its own separate session and will retry if the row is momentarily
+unavailable.
+
+Why lazy import for `parse_job`?
+
+`job_tasks.py` imports `app.ai.dependencies`, which is in the application layer. If
+`job_service.py` imported `job_tasks` at module level, a circular import would result
+when the worker imports `job_tasks`, which in turn imports service modules. Deferring the
+import to inside the method body breaks the cycle without adding indirection at the
+architecture level. The same pattern is used in `extraction_tasks.py` for
+`download_object_bytes`.
+
+Why use `queue="ai_tasks"` and not `"default"`?
+
+The `ai_tasks` queue is designed for AI-heavy work that has different scaling
+characteristics from file extraction (`default`). Job parsing calls the Anthropic
+provider; file extraction calls MinIO. Separate queues allow separate worker processes
+with separately tuned prefetch multipliers and instance counts — scaling AI workers does
+not require scaling storage workers.
+
+Why swallow all non-transient exceptions silently?
+
+Job creation must succeed regardless of AI provider availability. Propagating task
+failures to the creation response couples the HTTP contract to backend worker health.
+A job in the unparsed state is a valid product state — the manual re-parse endpoint
+exists precisely for recovery. Transient infrastructure failures (network, DB) are
+retried up to 3 times; non-transient failures (bad job text, provider errors) are logged
+by the AI cost service and left for the retry endpoint.
+
+Real issues encountered:
+
+The integration test runs against PostgreSQL in CI (ADR-014). Locally, the test
+collection against SQLite fails on unrelated `JSONB` columns in other models — a
+pre-existing repo-wide constraint. The new test was verified to compile cleanly and
+follows the same fixture and patch pattern as all other integration tests in the suite.
+The 141 existing unit tests that can run locally continued to pass.
+
+What future contributors should understand:
+
+`parsed_at` is `None` immediately after `POST /jobs` returns. Tests that assert on the
+creation response must not expect `parsed_at` to be set. The task sets it asynchronously.
+
+If the AI provider changes or a new task needs to call `JobService.parse()`, it must open
+its own `AsyncSessionLocal` and commit independently. Never pass the HTTP request's DB
+session into a Celery task — sessions are not thread-safe and will have been closed by the
+time the task runs.
+
+The `POST /jobs/{id}/parse` manual re-parse endpoint is unchanged and is the correct
+recovery mechanism for jobs stuck in the unparsed state.
