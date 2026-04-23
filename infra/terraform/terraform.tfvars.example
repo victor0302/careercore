@@ -1,7 +1,43 @@
-# Copy to terraform.tfvars and fill in real values.
-# Never commit terraform.tfvars — it is in .gitignore.
+# Copy this file to terraform.tfvars and fill in real values.
+# terraform.tfvars is gitignored — never commit it.
 
-region      = "us-east-1"
-app_name    = "careercore"
+# AWS region to deploy into.
+region = "us-east-1"
+
+# Short name for the application; used as a resource name prefix.
+app_name = "careercore"
+
+# Target environment. Affects resource naming and task counts.
+# Allowed values: development | staging | production
 environment = "development"
+
+# PostgreSQL master password for the RDS instance.
+# In CI/production, inject this from SSM Parameter Store or Vault.
 db_password = "replace-with-a-strong-password"
+
+# Docker image URI for the FastAPI backend.
+# Example: 123456789012.dkr.ecr.us-east-1.amazonaws.com/careercore-backend:latest
+backend_image = "replace-with-ecr-image-uri"
+
+# --- Optional overrides (defaults are suitable for development) ---
+
+# VPC CIDR block.
+# vpc_cidr = "10.0.0.0/16"
+
+# Two availability zones used for subnets. Must exist in var.region.
+# availability_zones = ["us-east-1a", "us-east-1b"]
+
+# Initial PostgreSQL database name.
+# db_name = "careercore"
+
+# PostgreSQL master username.
+# db_username = "careercore"
+
+# Fargate task CPU units (256 = 0.25 vCPU).
+# task_cpu = "256"
+
+# Fargate task memory in MiB.
+# task_memory = "512"
+
+# Number of running backend task replicas.
+# desired_count = 1
