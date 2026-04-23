@@ -31,9 +31,17 @@ export interface MasterProfile {
   completeness_pct: number;
 }
 
+export interface ProfileUpdate {
+  display_name?: string | null;
+  current_title?: string | null;
+  target_domain?: string | null;
+  summary_notes?: string | null;
+}
+
 export interface WorkExperience {
   id: string;
   profile_id: string;
+  source_file_id: string | null;
   employer: string;
   role_title: string;
   start_date: string; // ISO date string
