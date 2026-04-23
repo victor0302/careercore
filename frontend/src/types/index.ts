@@ -88,6 +88,55 @@ export interface Certification {
 
 // ── Jobs ─────────────────────────────────────────────────────────────────────
 
+export interface JobAnalysisSummaryRead {
+  id: string;
+  fit_score: number;
+  analyzed_at: string;
+}
+
+export interface MatchedRequirementRead {
+  id: string;
+  requirement_id: string;
+  match_type: string;
+  source_entity_type: string;
+  source_entity_id: string;
+  confidence: number;
+}
+
+export interface MissingRequirementRead {
+  id: string;
+  requirement_id: string;
+  suggested_action: string | null;
+}
+
+export interface JobAnalysisDetailRead extends JobAnalysisSummaryRead {
+  score_breakdown: Record<string, unknown>;
+  evidence_map: Record<string, unknown>;
+  matched_requirements: MatchedRequirementRead[];
+  missing_requirements: MissingRequirementRead[];
+}
+
+export interface JobListRead {
+  id: string;
+  user_id: string;
+  title: string;
+  company: string | null;
+  raw_text: string;
+  parsed_at: string | null;
+  latest_analysis: JobAnalysisSummaryRead | null;
+}
+
+export interface JobDetailRead {
+  id: string;
+  user_id: string;
+  title: string;
+  company: string | null;
+  raw_text: string;
+  parsed_at: string | null;
+  latest_analysis: JobAnalysisDetailRead | null;
+}
+
+/** @deprecated Use JobListRead or JobDetailRead */
 export interface JobDescription {
   id: string;
   user_id: string;
@@ -97,6 +146,7 @@ export interface JobDescription {
   parsed_at: string | null;
 }
 
+/** @deprecated Use JobAnalysisDetailRead */
 export interface JobAnalysis {
   id: string;
   job_id: string;
