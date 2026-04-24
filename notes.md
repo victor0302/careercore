@@ -3930,7 +3930,107 @@ type drift. The `ProfileUpdate` interface was absent for an entire sprint becaus
 was no enforcement mechanism — consider adding a type-check test or a lint rule as a
 follow-up.
 
-### 12.44 Issue #107 — Terraform Phase 1: wire modules and fix placeholder outputs
+### 12.44 Issue #104 — Job detail and analysis view (PR #119)
+
+Before this PR, every job row in `GET /jobs` was a dead `<li>` with no navigation.
+Clicking a job did nothing. The backend's `GET /api/v1/jobs/{job_id}` already returned a
+rich payload including fit score, matched requirements, and missing requirements, but the
+frontend had no route to consume it. This PR closes that gap.
+
+What changed:
+
+**New route — `frontend/src/app/jobs/[job_id]/page.tsx`:**
+
+- `useQuery` fetches `GET /api/v1/jobs/{job_id}` and types the response as `JobDetailRead`.
+- Header renders `title`, `company`, and `parsed_at` date.
+- When `latest_analysis` is present: fit score as a percentage badge, `analyzed_at`
+  timestamp, matched requirements list (match_type + confidence %), and missing requirements
+  list (suggested_action when present).
+- `score_breakdown` and `evidence_map` are arbitrary dicts rendered inside a collapsible
+  `<details>` / `<summary>` block — accessible but not dominant.
+- When `parsed_at` is null (job not yet parsed) or when `latest_analysis` is null: shows a
+  clear "Not yet analyzed" / "No analysis yet" state with a "Run analysis" button that
+  calls `POST /api/v1/jobs/{job_id}/parse` and invalidates the query on success.
+- Loading, error, and empty-analysis states all handled; no unhandled promise rejections.
+- `← Back to Jobs` link at the top.
+
+**Updated list — `frontend/src/app/jobs/page.tsx`:**
+
+- Each `<li>` is now wrapped in a Next.js `<Link href={/jobs/${job.id}}>`.
+- Fit score badge shown inline when `latest_analysis` is present on the `JobListRead`.
+- Type updated from `JobDescription` to `JobListRead`.
+
+**Updated types — `frontend/src/types/index.ts`:**
+
+Added the full set of backend-contract interfaces:
+- `JobAnalysisSummaryRead` — id, fit_score, analyzed_at
+- `MatchedRequirementRead` — id, requirement_id, match_type, source_entity_type,
+  source_entity_id, confidence
+- `MissingRequirementRead` — id, requirement_id, suggested_action
+- `JobAnalysisDetailRead extends JobAnalysisSummaryRead` — adds score_breakdown,
+  evidence_map, matched_requirements[], missing_requirements[]
+- `JobListRead` — job list shape with `latest_analysis: JobAnalysisSummaryRead | null`
+- `JobDetailRead` — job detail shape with `latest_analysis: JobAnalysisDetailRead | null`
+
+Old `JobDescription` and `JobAnalysis` kept as `@deprecated` stubs so no existing import
+breaks. They can be removed once the codebase has migrated (only the jobs pages used them).
+
+**Created `frontend/src/lib/` (api.ts, auth.ts, utils.ts):**
+
+These files were missing from the repository because the root `.gitignore` has `lib/` in
+the Python section (intended to exclude Python build artifacts), which accidentally also
+matches `frontend/src/lib/`. All three lib files were force-added with `git add -f`.
+
+- `api.ts` — typed `api.get/post/patch/delete` helpers with Bearer-token injection, JSON
+  parsing, and `ApiRequestError` (wraps status + detail message).
+- `auth.ts` — `sessionStorage`-backed `getAccessToken / setAccessToken / clearTokens`.
+- `utils.ts` — `cn()` using `clsx` + `tailwind-merge`, required by shadcn/ui components.
+
+Without these files the frontend could not compile at all (every page imports from
+`@/lib/api`). They were never committed because of the gitignore issue.
+
+Why collapsible `<details>` for score_breakdown / evidence_map?
+
+These are `Record<string, unknown>` dicts whose schema is not guaranteed. Rendering them
+inline as JSON in a `<pre>` block would dominate the page on real responses. The native
+`<details>` element is zero-dependency, fully accessible, and keeps the data reachable
+without cluttering the primary analysis UI.
+
+Why `use(params)` for the dynamic segment?
+
+Next.js 14 App Router passes `params` as a `Promise<{ job_id: string }>` in async-capable
+client components. Using React 19's `use()` hook to unwrap it is the correct pattern
+going forward; the old synchronous `params.job_id` pattern produces a deprecation warning
+in Next.js 15+.
+
+Why invalidate `["jobs", job_id]` rather than `["jobs"]` after re-parse?
+
+The re-parse button is on the detail page, which owns the single-job query. Invalidating
+the broader `["jobs"]` list would also refetch the list page in the background, which is
+unnecessary. The list badge updates naturally the next time the user navigates back.
+
+Real issues encountered:
+
+`frontend/src/lib/` was absent from the repo despite being imported by all existing pages.
+This was discovered only when checking `git ls-files` — the files existed on-disk in the
+original developer's environment and were never committed due to the `.gitignore` match.
+Force-adding with `git add -f` surfaces them in the commit.
+
+TypeScript type-check (`npx tsc --noEmit`) passed clean after all changes.
+
+What future contributors should understand:
+
+When adding new fields to the job detail API response, add them to `JobDetailRead` and
+`JobAnalysisDetailRead` in `frontend/src/types/index.ts` in the same PR. The deprecation
+comment on `JobDescription` is the signal to migrate remaining callers
+(`jobs/new/page.tsx`) before the next major refactor.
+
+The `frontend/src/lib/` directory is now force-tracked. Any new files added to that
+directory will be visible to git without needing `-f` again.
+
+---
+
+### 12.45 Issue #107 — Terraform Phase 1: wire modules and fix placeholder outputs
 
 Before this PR the four modules under `infra/terraform/modules/` were empty stubs and
 `outputs.tf` returned hard-coded `example.com` strings. A new contributor cloning the
@@ -3944,7 +4044,7 @@ What changed:
   security groups: `compute` (egress-only, attached to ECS Fargate tasks) and `database`
   (port 5432 ingress from the compute SG only). Both SGs live here — not in the
   functional modules — to break the circular dependency between compute and database (see
-  ADR-049).
+  ADR-050).
 
 - **database/main.tf** — RDS subnet group built from the networking module's private
   subnets, plus a PostgreSQL 15 instance on `db.t3.micro`. Outputs `db_address` (hostname
