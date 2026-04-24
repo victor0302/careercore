@@ -1580,3 +1580,4 @@ A `locals` block in root `main.tf` derives the shared S3 bucket name so both com
 - Security group rules that span two functional modules (compute ↔ database) are co-located in the networking module, which is the natural home for cross-cutting network policy.
 - Any new module that needs to communicate with an existing tier must request its security group ID from the networking module rather than declaring a new group independently — keeps all inter-tier rules visible in one place.
 - Phase 2 ALB addition: create an `aws_security_group.alb` in networking, update `compute` to allow ingress from the ALB SG, and replace the `backend_url` output with the ALB DNS name.
+
