@@ -1,15 +1,15 @@
 output "backend_url" {
-  description = "Public URL of the FastAPI backend"
-  value       = "https://api.${var.app_name}.example.com"  # TODO: replace with actual resource output
+  description = "ECS service identifier for the FastAPI backend (Phase 1: no public ALB; add load balancer in Phase 2 for an HTTPS URL)"
+  value       = "ecs://${module.compute.ecs_cluster_id}/${module.compute.ecs_service_name}"
 }
 
 output "frontend_url" {
-  description = "Public URL of the Next.js frontend"
-  value       = "https://${var.app_name}.example.com"  # TODO: replace with actual resource output
+  description = "Frontend deployment target (Phase 1: not provisioned; wire CloudFront + S3 static site in Phase 2)"
+  value       = "${var.app_name}-${var.environment}-frontend"
 }
 
 output "db_endpoint" {
-  description = "PostgreSQL endpoint (internal)"
-  value       = "db.${var.app_name}.internal"  # TODO: replace with RDS endpoint output
+  description = "PostgreSQL RDS endpoint in address:port format (internal use only)"
+  value       = module.database.db_endpoint
   sensitive   = true
 }
