@@ -12,8 +12,8 @@ const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export class ApiRequestError extends Error {
   constructor(
-    public status: number,
-    public detail: string
+    public readonly status: number,
+    public readonly detail: string
   ) {
     super(`API error ${status}: ${detail}`);
     this.name = "ApiRequestError";

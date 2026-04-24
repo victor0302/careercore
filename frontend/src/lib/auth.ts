@@ -1,6 +1,6 @@
 /**
  * Token storage and refresh utilities.
- * Access tokens are stored in localStorage. Refresh tokens live in an
+ * Access tokens are stored in sessionStorage. Refresh tokens live in an
  * httpOnly cookie and are never exposed to frontend JavaScript.
  */
 
@@ -8,15 +8,15 @@ const ACCESS_TOKEN_KEY = "cc_access_token";
 
 export function getAccessToken(): string | null {
   if (typeof window === "undefined") return null;
-  return localStorage.getItem(ACCESS_TOKEN_KEY);
+  return sessionStorage.getItem(ACCESS_TOKEN_KEY);
 }
 
 export function setAccessToken(token: string): void {
-  localStorage.setItem(ACCESS_TOKEN_KEY, token);
+  sessionStorage.setItem(ACCESS_TOKEN_KEY, token);
 }
 
 export function clearTokens(): void {
-  localStorage.removeItem(ACCESS_TOKEN_KEY);
+  sessionStorage.removeItem(ACCESS_TOKEN_KEY);
 }
 
 export async function refreshAccessToken(): Promise<string | null> {
