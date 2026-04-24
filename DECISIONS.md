@@ -1552,3 +1552,32 @@ need `-f` until the `.gitignore` is corrected with a path-prefixed rule.
   to `frontend/src/lib/` requires `git add -f` until `.gitignore` is fixed.
 - A follow-up issue should add a path-prefixed rule (e.g., `!frontend/src/lib/`) or
   restructure the `.gitignore` to scope the `lib/` exclusion to Python directories only.
+
+---
+
+## ADR-050 — Phase 1 Terraform: security groups live in the networking module
+
+**Date:** 2026-04-24 (PR #120, issue #107)  
+**Status:** Accepted
+
+**Context:**  
+Issue #107 replaced the four Terraform module stubs with real resource declarations. Two modules created a circular dependency: the database module needed the compute security group ID to restrict RDS ingress, while the compute module needed the RDS endpoint to construct the `DATABASE_URL` container environment variable. Neither module could be instantiated before the other.
+
+**Decision:**  
+Security groups for both the compute tier (ECS Fargate tasks) and the database tier (RDS) are declared in the networking module, not in their respective functional modules.
+
+- `aws_security_group.compute` — egress-only; attached to ECS tasks.
+- `aws_security_group.database` — allows port 5432 ingress from `aws_security_group.compute` only.
+
+The networking module outputs both IDs (`compute_security_group_id`, `db_security_group_id`). The root module passes `compute_security_group_id` to both the compute and database modules. The database module outputs `db_address` (hostname-only), which the root module passes into compute for `DATABASE_URL` construction. This breaks the circular dependency at the root level.
+
+A `locals` block in root `main.tf` derives the shared S3 bucket name so both compute (for the IAM task role policy) and storage (for the bucket resource itself) can reference the same value without a circular dependency between those two modules.
+
+**Phase 1 support boundary:** no Application Load Balancer, no NAT Gateway, no WAF, no Secrets Manager. `backend_url` output references the ECS service name (not a public URL) until Phase 2 wires an ALB. Database credentials are passed as task-definition environment variables; migrate to AWS Secrets Manager before staging or production.
+
+**Consequences:**  
+- The module dependency graph is acyclic: `networking → {database, compute}`, `compute → storage`.
+- Security group rules that span two functional modules (compute ↔ database) are co-located in the networking module, which is the natural home for cross-cutting network policy.
+- Any new module that needs to communicate with an existing tier must request its security group ID from the networking module rather than declaring a new group independently — keeps all inter-tier rules visible in one place.
+- Phase 2 ALB addition: create an `aws_security_group.alb` in networking, update `compute` to allow ingress from the ALB SG, and replace the `backend_url` output with the ALB DNS name.
+

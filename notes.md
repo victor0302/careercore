@@ -4027,3 +4027,90 @@ comment on `JobDescription` is the signal to migrate remaining callers
 
 The `frontend/src/lib/` directory is now force-tracked. Any new files added to that
 directory will be visible to git without needing `-f` again.
+
+---
+
+### 12.45 Issue #107 — Terraform Phase 1: wire modules and fix placeholder outputs
+
+Before this PR the four modules under `infra/terraform/modules/` were empty stubs and
+`outputs.tf` returned hard-coded `example.com` strings. A new contributor cloning the
+repo had no runnable infrastructure definition and no way to understand what inputs were
+required.
+
+What changed:
+
+- **networking/main.tf** — VPC (10.0.0.0/16 default), two public subnets and two private
+  subnets (one per AZ), Internet Gateway, public route table with associations, and two
+  security groups: `compute` (egress-only, attached to ECS Fargate tasks) and `database`
+  (port 5432 ingress from the compute SG only). All four SGs live here — not in the
+  functional modules — to break the circular dependency between compute and database (see
+  ADR-050).
+
+- **database/main.tf** — RDS subnet group built from the networking module's private
+  subnets, plus a PostgreSQL 15 instance on `db.t3.micro`. Outputs `db_address` (hostname
+  only), `db_endpoint` (address:port), and `db_port`.
+
+- **compute/main.tf** — ECS cluster, IAM execution role (AmazonECSTaskExecutionRolePolicy
+  attachment), IAM task role (inline S3 put/get policy), CloudWatch log group (14-day
+  retention), Fargate task definition (backend image, DATABASE_URL and S3_BUCKET
+  environment variables, awslogs driver), and ECS service in private subnets. Uses
+  `data.aws_region.current` to avoid passing the region as an explicit variable.
+
+- **storage/main.tf** — S3 bucket, versioning enabled, and a bucket policy that grants
+  `s3:GetObject` and `s3:PutObject` to the ECS task role ARN passed in from the compute
+  module.
+
+- **Root main.tf** — `locals.bucket_name` derives the shared bucket name
+  (`{app_name}-{environment}-resumes`) so both compute and storage reference the same
+  value without creating a circular module dependency. Wires all four modules in acyclic
+  order: networking → database, networking → compute, compute → storage.
+
+- **Root outputs.tf** — `backend_url` is `ecs://{cluster_id}/{service_name}` (no public
+  ALB in Phase 1); `frontend_url` is a name token (frontend not yet provisioned);
+  `db_endpoint` references `module.database.db_endpoint` and is marked sensitive.
+
+- **Root variables.tf** — added `vpc_cidr`, `availability_zones`, `backend_image`
+  (required), `db_name`, `db_username`, `task_cpu`, `task_memory`, `desired_count`.
+
+- **terraform.tfvars.example** — documents every required variable (`db_password`,
+  `backend_image`) and every optional override with inline comments.
+
+`terraform validate` passes after `terraform init -backend=false`.
+
+Why security groups live in the networking module and not in compute/database:
+
+If the compute SG were declared in the compute module and the database SG in the database
+module, neither module could be instantiated first because each one needs the other's SG
+ID to create its ingress/egress rule. Moving both SGs to networking, which has no
+dependencies on the other modules, collapses the cycle. The networking module is also the
+natural home for cross-cutting network policy — it already owns the VPC and subnets.
+
+Why use a `locals` block for the bucket name instead of an output:
+
+The storage module needs the bucket name to create the `aws_s3_bucket` resource. The
+compute module needs it to construct the task role's S3 IAM policy and the container
+environment variable. If compute output the bucket name, storage would depend on compute;
+if storage output it, compute would depend on storage. Either path creates a cycle. A
+root-level `locals` block derives the name from existing variables and passes it to both
+modules, eliminating the dependency entirely.
+
+Why `DATABASE_URL` is in the task definition environment and not Secrets Manager:
+
+Phase 1 is a dev environment. Secrets Manager adds operational complexity (rotation
+policies, IAM secret access, cross-service latency) that is not justified until staging
+or production. The `db_password` variable is marked `sensitive = true` in Terraform so it
+is never shown in plan output. Migrate to Secrets Manager before the first staging deploy.
+
+What future contributors should understand:
+
+- To add an ALB in Phase 2: declare `aws_security_group.alb` in the networking module,
+  add an `aws_lb` and listener in a new `loadbalancer` module (or in compute), update the
+  compute SG to allow ingress from the ALB SG, and replace `backend_url` output with the
+  ALB DNS name.
+- The `backend_image` variable is required and has no default. CI/CD must supply it (e.g.,
+  as the ECR image tagged with the current Git SHA).
+- `desired_count = 1` by default. Phase 2 should raise this for staging/production and
+  add an Auto Scaling policy to the compute module.
+- `skip_final_snapshot = true` and `deletion_protection = false` are intentional for Phase
+  1 dev. Set both to their opposite values before any production deploy.
+
