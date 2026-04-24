@@ -88,6 +88,55 @@ export interface Certification {
 
 // ── Jobs ─────────────────────────────────────────────────────────────────────
 
+export interface JobAnalysisSummaryRead {
+  id: string;
+  fit_score: number;
+  analyzed_at: string;
+}
+
+export interface MatchedRequirementRead {
+  id: string;
+  requirement_id: string;
+  match_type: string;
+  source_entity_type: string;
+  source_entity_id: string;
+  confidence: number;
+}
+
+export interface MissingRequirementRead {
+  id: string;
+  requirement_id: string;
+  suggested_action: string | null;
+}
+
+export interface JobAnalysisDetailRead extends JobAnalysisSummaryRead {
+  score_breakdown: Record<string, unknown>;
+  evidence_map: Record<string, unknown>;
+  matched_requirements: MatchedRequirementRead[];
+  missing_requirements: MissingRequirementRead[];
+}
+
+export interface JobListRead {
+  id: string;
+  user_id: string;
+  title: string;
+  company: string | null;
+  raw_text: string;
+  parsed_at: string | null;
+  latest_analysis: JobAnalysisSummaryRead | null;
+}
+
+export interface JobDetailRead {
+  id: string;
+  user_id: string;
+  title: string;
+  company: string | null;
+  raw_text: string;
+  parsed_at: string | null;
+  latest_analysis: JobAnalysisDetailRead | null;
+}
+
+/** @deprecated Use JobListRead or JobDetailRead */
 export interface JobDescription {
   id: string;
   user_id: string;
@@ -97,6 +146,7 @@ export interface JobDescription {
   parsed_at: string | null;
 }
 
+/** @deprecated Use JobAnalysisDetailRead */
 export interface JobAnalysis {
   id: string;
   job_id: string;
@@ -109,6 +159,12 @@ export interface JobAnalysis {
 // ── Resumes ───────────────────────────────────────────────────────────────────
 
 export interface Resume {
+  id: string;
+  user_id: string;
+  job_id: string | null;
+}
+
+export interface ResumeRead {
   id: string;
   user_id: string;
   job_id: string | null;
@@ -127,6 +183,53 @@ export interface ResumeBullet {
   is_ai_generated: boolean;
   is_approved: boolean;
   confidence: number | null;
+}
+
+export interface ResumeBulletRead {
+  id: string;
+  resume_id: string;
+  text: string;
+  is_ai_generated: boolean;
+  is_approved: boolean;
+  confidence: number | null;
+}
+
+export interface BulletsGenerateRequest {
+  profile_entity_type: "work_experience" | "project";
+  profile_entity_id: string;
+  requirement_ids: string[];
+}
+
+export interface EvidenceLinkRead {
+  source_entity_type: string;
+  source_entity_id: string;
+  display_name: string;
+}
+
+export interface ResumeBulletWithEvidence {
+  id: string;
+  text: string;
+  confidence: number | null;
+  evidence: EvidenceLinkRead[];
+}
+
+export interface ResumeVersionListItem {
+  id: string;
+  resume_id: string;
+  fit_score_at_gen: number | null;
+  created_at: string;
+  job_title: string | null;
+  job_company: string | null;
+}
+
+export interface ResumeVersionDetailRead {
+  id: string;
+  resume_id: string;
+  fit_score_at_gen: number | null;
+  created_at: string;
+  job_title: string | null;
+  job_company: string | null;
+  bullets: ResumeBulletWithEvidence[];
 }
 
 // ── API responses ─────────────────────────────────────────────────────────────

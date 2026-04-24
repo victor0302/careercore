@@ -1445,7 +1445,117 @@ privileges through setuid binaries. Both production images use uid 1001 (`appuse
 
 ---
 
-## ADR-049 — Phase 1 Terraform: security groups live in the networking module
+## ADR-048 — Profile workspace: single-file component with per-section CRUD and TanStack Query v5 patterns
+
+**Date:** 2026-04-22 (PR #117, issue #103)  
+**Status:** Accepted
+
+**Context:**  
+`frontend/src/app/profile/page.tsx` was a stub with a sprint-2 TODO. The backend exposes
+five profile-related resource groups, each with full GET / POST / PATCH / DELETE endpoints.
+The frontend needed a working workspace covering all five groups. Two type-drift bugs were
+also present in `frontend/src/types/index.ts`.
+
+**Decision:**  
+Implement the entire profile workspace as a single `page.tsx` file containing five
+section-level React components (`BasicInfoSection`, `WorkExperienceSection`,
+`ProjectsSection`, `SkillsSection`, `CertificationsSection`) and a `ProfilePage` root.
+
+Key choices within the implementation:
+
+*TanStack Query v5 form-sync pattern:* `useQuery` in v5 does not support `onSuccess`.
+Form state is initialised from query data via `useEffect([data])`. `useMutation` retains
+`onSuccess` / `onError` callbacks, which are used for cache updates and error display.
+
+*Cache invalidation:* `queryClient.invalidateQueries({ queryKey: [...] })` with the
+object-param syntax required by v5. List queries are namespaced as `["profile", entity]`
+so invalidating one section does not refetch the others.
+
+*`renderForm()` pattern:* Each section defines a `renderForm()` function (not a
+sub-component) that returns the shared form JSX used for both the inline add position
+(above the list) and the inline edit position (replacing the row content). This avoids
+prop drilling while keeping the add and edit cases in one place.
+
+*Inline edit, not modal:* Clicking "Edit" on a row sets `editingId` state, which replaces
+the row content with the edit form. Only one form (add or edit) is active at a time; the
+`startEdit` handler calls `setShowAdd(false)` and vice versa.
+
+*Single file:* All five section components live in `page.tsx`. Extracting them to separate
+files would provide no architectural benefit at this scale and would fragment a tightly
+coupled feature into five files that always change together.
+
+*Type drift fixes:* `ProfileUpdate` interface added (was entirely absent); `source_file_id:
+string | null` added to `WorkExperience` (present in the backend `WorkExperienceRead`
+schema but missing from the TypeScript type since the type was first authored).
+
+**Consequences:**  
+- All five profile sections are functional: users can view, create, edit, and delete
+  records in each section without a page reload.
+- `page.tsx` is large (~450 lines) but structurally uniform — each section follows the
+  identical `useQuery + useMutation × 3 + showAdd/editingId state + renderForm()` pattern.
+- Switching tabs unmounts the previous section component, resetting any open form state —
+  intentional behavior.
+- Future additions (AI-suggested tags, drag-to-reorder) should extract individual sections
+  into their own files at that point; no pre-emptive abstraction was added now.
+- The `source_file_id` field on work experience and the AI-populated tag arrays are not
+  editable in the form — they are set only by the extraction pipeline.
+
+---
+
+## ADR-049 — Job detail page: collapsible raw data, use(params) for dynamic segments, force-tracked lib/
+
+**Date:** 2026-04-24 (PR #119, issue #104)  
+**Status:** Accepted
+
+**Context:**  
+Issue #104 required a `/jobs/[job_id]` detail route that renders the rich analysis payload
+from `GET /api/v1/jobs/{job_id}`. Three design choices needed explicit decisions: how to
+render the unstructured `score_breakdown` / `evidence_map` dicts, how to access the Next.js
+dynamic route segment in a client component, and how to handle the missing `frontend/src/lib/`
+directory.
+
+**Decision 1 — Collapsible `<details>` for score_breakdown and evidence_map:**
+
+`score_breakdown` and `evidence_map` are `Record<string, unknown>` — their schema is not
+guaranteed by the API contract. Rendering them as formatted JSON inside a native `<details>`
+/ `<summary>` block keeps the data reachable and accessible without requiring a third-party
+accordion library, adding a loading state, or dominating the primary fit-score UI. The
+`<details>` element is zero-JS and fully keyboard-accessible by default. An alternative
+(always-visible `<pre>`) was rejected because real responses may be large; a modal was
+rejected as unnecessary complexity.
+
+**Decision 2 — React `use(params)` for the dynamic segment:**
+
+Next.js 14 App Router passes `params` as `Promise<{ job_id: string }>` to client
+components. Unwrapping with `use(params)` is the officially documented pattern for Next.js
+14+ and is forward-compatible with Next.js 15. The legacy synchronous `params.job_id`
+access produces a deprecation warning in Next.js 15 and will eventually become an error.
+Starting with `use()` avoids a future migration.
+
+**Decision 3 — Force-track `frontend/src/lib/` with `git add -f`:**
+
+The root `.gitignore` contains `lib/` in the Python section (intended to match Python
+build artifact directories like `lib/`, `lib64/`). Without a leading `/` or a path prefix,
+this pattern also matches `frontend/src/lib/`. The three files (`api.ts`, `auth.ts`,
+`utils.ts`) were on-disk in the original developer's environment but never committed.
+Rather than modifying `.gitignore` globally (which could accidentally track Python build
+artifacts), the three files were force-added with `git add -f`, which creates a permanent
+exception for those specific paths. Future files added to `frontend/src/lib/` will also
+need `-f` until the `.gitignore` is corrected with a path-prefixed rule.
+
+**Consequences:**
+- `score_breakdown` / `evidence_map` are visible via expand-on-demand; the primary analysis
+  UI (fit score, matched/missing requirements) is never buried.
+- New dynamic route segments in client components should use `use(params)` for
+  forward-compatibility.
+- `frontend/src/lib/api.ts`, `auth.ts`, and `utils.ts` are now tracked. Any new file added
+  to `frontend/src/lib/` requires `git add -f` until `.gitignore` is fixed.
+- A follow-up issue should add a path-prefixed rule (e.g., `!frontend/src/lib/`) or
+  restructure the `.gitignore` to scope the `lib/` exclusion to Python directories only.
+
+---
+
+## ADR-050 — Phase 1 Terraform: security groups live in the networking module
 
 **Date:** 2026-04-24 (PR #120, issue #107)  
 **Status:** Accepted
@@ -1470,3 +1580,4 @@ A `locals` block in root `main.tf` derives the shared S3 bucket name so both com
 - Security group rules that span two functional modules (compute ↔ database) are co-located in the networking module, which is the natural home for cross-cutting network policy.
 - Any new module that needs to communicate with an existing tier must request its security group ID from the networking module rather than declaring a new group independently — keeps all inter-tier rules visible in one place.
 - Phase 2 ALB addition: create an `aws_security_group.alb` in networking, update `compute` to allow ingress from the ALB SG, and replace the `backend_url` output with the ALB DNS name.
+
