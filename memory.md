@@ -133,3 +133,42 @@ What to remember next time:
 - when the standard test bootstrap fails before your new code loads, isolate
   the module-level migration tests rather than broadening the ticket to fix
   unrelated packaging work
+
+### Issue #107 — Terraform Phase 1 infrastructure
+
+What was done:
+- read `DECISIONS.md` and all four module stubs before starting
+- replaced stubs with real resource declarations across all four modules
+  (networking, compute, database, storage) plus module-level `variables.tf`
+  and `outputs.tf` for each
+- wired all four modules in root `main.tf` with correct output threading
+- replaced hard-coded `example.com` strings in root `outputs.tf` with real
+  module/resource references
+- added `backend_image` and several optional override variables to root
+  `variables.tf` and documented them in `terraform.tfvars.example`
+- ran `terraform init -backend=false` and `terraform validate` — both pass
+- committed one change set, pushed, opened PR #120 (merged same day)
+- added notes section 12.44 and ADR-049 in this docs PR
+
+What mattered:
+- security groups for compute and database both live in the networking module
+  — this is what breaks the circular dependency between compute (needs DB
+  endpoint) and database (needs compute SG ID); see ADR-049
+- a `locals.bucket_name` in root `main.tf` breaks the equivalent cycle between
+  compute (needs bucket name for IAM policy) and storage (creates the bucket)
+- the database module outputs both `db_address` (hostname only) and
+  `db_endpoint` (address:port) — compute uses `db_address` to avoid embedding
+  the port twice in the DATABASE_URL string
+- `backend_image` has no default; it is a required variable that CI/CD must
+  supply (e.g., the ECR image tagged with the current Git SHA)
+
+What to remember next time:
+- when implementing Terraform modules, draw the dependency graph first; any
+  cycle must be broken by moving shared resources to a lower-level module or
+  a root-level `locals` block
+- notes and ADR numbers can conflict across concurrent branches — always check
+  the highest number in all active issue worktrees before assigning new ones
+  (this session had to change from 12.42/ADR-048 to 12.44/ADR-049 after
+  discovering conflicts with docs-103 and issue-104 branches)
+- `skip_final_snapshot = true` and `deletion_protection = false` are Phase 1
+  dev defaults; they must be reversed before any staging deploy
