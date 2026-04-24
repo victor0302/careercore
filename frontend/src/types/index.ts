@@ -114,6 +114,12 @@ export interface Resume {
   job_id: string | null;
 }
 
+export interface ResumeRead {
+  id: string;
+  user_id: string;
+  job_id: string | null;
+}
+
 export interface ResumeVersion {
   id: string;
   resume_id: string;
@@ -127,6 +133,53 @@ export interface ResumeBullet {
   is_ai_generated: boolean;
   is_approved: boolean;
   confidence: number | null;
+}
+
+export interface ResumeBulletRead {
+  id: string;
+  resume_id: string;
+  text: string;
+  is_ai_generated: boolean;
+  is_approved: boolean;
+  confidence: number | null;
+}
+
+export interface BulletsGenerateRequest {
+  profile_entity_type: "work_experience" | "project";
+  profile_entity_id: string;
+  requirement_ids: string[];
+}
+
+export interface EvidenceLinkRead {
+  source_entity_type: string;
+  source_entity_id: string;
+  display_name: string;
+}
+
+export interface ResumeBulletWithEvidence {
+  id: string;
+  text: string;
+  confidence: number | null;
+  evidence: EvidenceLinkRead[];
+}
+
+export interface ResumeVersionListItem {
+  id: string;
+  resume_id: string;
+  fit_score_at_gen: number | null;
+  created_at: string;
+  job_title: string | null;
+  job_company: string | null;
+}
+
+export interface ResumeVersionDetailRead {
+  id: string;
+  resume_id: string;
+  fit_score_at_gen: number | null;
+  created_at: string;
+  job_title: string | null;
+  job_company: string | null;
+  bullets: ResumeBulletWithEvidence[];
 }
 
 // ── API responses ─────────────────────────────────────────────────────────────
