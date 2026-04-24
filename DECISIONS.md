@@ -1499,3 +1499,56 @@ schema but missing from the TypeScript type since the type was first authored).
   into their own files at that point; no pre-emptive abstraction was added now.
 - The `source_file_id` field on work experience and the AI-populated tag arrays are not
   editable in the form — they are set only by the extraction pipeline.
+
+---
+
+## ADR-049 — Job detail page: collapsible raw data, use(params) for dynamic segments, force-tracked lib/
+
+**Date:** 2026-04-24 (PR #119, issue #104)  
+**Status:** Accepted
+
+**Context:**  
+Issue #104 required a `/jobs/[job_id]` detail route that renders the rich analysis payload
+from `GET /api/v1/jobs/{job_id}`. Three design choices needed explicit decisions: how to
+render the unstructured `score_breakdown` / `evidence_map` dicts, how to access the Next.js
+dynamic route segment in a client component, and how to handle the missing `frontend/src/lib/`
+directory.
+
+**Decision 1 — Collapsible `<details>` for score_breakdown and evidence_map:**
+
+`score_breakdown` and `evidence_map` are `Record<string, unknown>` — their schema is not
+guaranteed by the API contract. Rendering them as formatted JSON inside a native `<details>`
+/ `<summary>` block keeps the data reachable and accessible without requiring a third-party
+accordion library, adding a loading state, or dominating the primary fit-score UI. The
+`<details>` element is zero-JS and fully keyboard-accessible by default. An alternative
+(always-visible `<pre>`) was rejected because real responses may be large; a modal was
+rejected as unnecessary complexity.
+
+**Decision 2 — React `use(params)` for the dynamic segment:**
+
+Next.js 14 App Router passes `params` as `Promise<{ job_id: string }>` to client
+components. Unwrapping with `use(params)` is the officially documented pattern for Next.js
+14+ and is forward-compatible with Next.js 15. The legacy synchronous `params.job_id`
+access produces a deprecation warning in Next.js 15 and will eventually become an error.
+Starting with `use()` avoids a future migration.
+
+**Decision 3 — Force-track `frontend/src/lib/` with `git add -f`:**
+
+The root `.gitignore` contains `lib/` in the Python section (intended to match Python
+build artifact directories like `lib/`, `lib64/`). Without a leading `/` or a path prefix,
+this pattern also matches `frontend/src/lib/`. The three files (`api.ts`, `auth.ts`,
+`utils.ts`) were on-disk in the original developer's environment but never committed.
+Rather than modifying `.gitignore` globally (which could accidentally track Python build
+artifacts), the three files were force-added with `git add -f`, which creates a permanent
+exception for those specific paths. Future files added to `frontend/src/lib/` will also
+need `-f` until the `.gitignore` is corrected with a path-prefixed rule.
+
+**Consequences:**
+- `score_breakdown` / `evidence_map` are visible via expand-on-demand; the primary analysis
+  UI (fit score, matched/missing requirements) is never buried.
+- New dynamic route segments in client components should use `use(params)` for
+  forward-compatibility.
+- `frontend/src/lib/api.ts`, `auth.ts`, and `utils.ts` are now tracked. Any new file added
+  to `frontend/src/lib/` requires `git add -f` until `.gitignore` is fixed.
+- A follow-up issue should add a path-prefixed rule (e.g., `!frontend/src/lib/`) or
+  restructure the `.gitignore` to scope the `lib/` exclusion to Python directories only.
