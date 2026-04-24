@@ -1445,7 +1445,64 @@ privileges through setuid binaries. Both production images use uid 1001 (`appuse
 
 ---
 
-## ADR-048 — Job detail page: collapsible raw data, use(params) for dynamic segments, force-tracked lib/
+## ADR-048 — Profile workspace: single-file component with per-section CRUD and TanStack Query v5 patterns
+
+**Date:** 2026-04-22 (PR #117, issue #103)  
+**Status:** Accepted
+
+**Context:**  
+`frontend/src/app/profile/page.tsx` was a stub with a sprint-2 TODO. The backend exposes
+five profile-related resource groups, each with full GET / POST / PATCH / DELETE endpoints.
+The frontend needed a working workspace covering all five groups. Two type-drift bugs were
+also present in `frontend/src/types/index.ts`.
+
+**Decision:**  
+Implement the entire profile workspace as a single `page.tsx` file containing five
+section-level React components (`BasicInfoSection`, `WorkExperienceSection`,
+`ProjectsSection`, `SkillsSection`, `CertificationsSection`) and a `ProfilePage` root.
+
+Key choices within the implementation:
+
+*TanStack Query v5 form-sync pattern:* `useQuery` in v5 does not support `onSuccess`.
+Form state is initialised from query data via `useEffect([data])`. `useMutation` retains
+`onSuccess` / `onError` callbacks, which are used for cache updates and error display.
+
+*Cache invalidation:* `queryClient.invalidateQueries({ queryKey: [...] })` with the
+object-param syntax required by v5. List queries are namespaced as `["profile", entity]`
+so invalidating one section does not refetch the others.
+
+*`renderForm()` pattern:* Each section defines a `renderForm()` function (not a
+sub-component) that returns the shared form JSX used for both the inline add position
+(above the list) and the inline edit position (replacing the row content). This avoids
+prop drilling while keeping the add and edit cases in one place.
+
+*Inline edit, not modal:* Clicking "Edit" on a row sets `editingId` state, which replaces
+the row content with the edit form. Only one form (add or edit) is active at a time; the
+`startEdit` handler calls `setShowAdd(false)` and vice versa.
+
+*Single file:* All five section components live in `page.tsx`. Extracting them to separate
+files would provide no architectural benefit at this scale and would fragment a tightly
+coupled feature into five files that always change together.
+
+*Type drift fixes:* `ProfileUpdate` interface added (was entirely absent); `source_file_id:
+string | null` added to `WorkExperience` (present in the backend `WorkExperienceRead`
+schema but missing from the TypeScript type since the type was first authored).
+
+**Consequences:**  
+- All five profile sections are functional: users can view, create, edit, and delete
+  records in each section without a page reload.
+- `page.tsx` is large (~450 lines) but structurally uniform — each section follows the
+  identical `useQuery + useMutation × 3 + showAdd/editingId state + renderForm()` pattern.
+- Switching tabs unmounts the previous section component, resetting any open form state —
+  intentional behavior.
+- Future additions (AI-suggested tags, drag-to-reorder) should extract individual sections
+  into their own files at that point; no pre-emptive abstraction was added now.
+- The `source_file_id` field on work experience and the AI-populated tag arrays are not
+  editable in the form — they are set only by the extraction pipeline.
+
+---
+
+## ADR-049 — Job detail page: collapsible raw data, use(params) for dynamic segments, force-tracked lib/
 
 **Date:** 2026-04-24 (PR #119, issue #104)  
 **Status:** Accepted
