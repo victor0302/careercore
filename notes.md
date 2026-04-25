@@ -4027,3 +4027,240 @@ comment on `JobDescription` is the signal to migrate remaining callers
 
 The `frontend/src/lib/` directory is now force-tracked. Any new files added to that
 directory will be visible to git without needing `-f` again.
+
+### 12.45 Issue #107 — Phase 1 Terraform infrastructure modules (PR #120)
+
+Before this PR, all four module directories (`networking/`, `compute/`, `database/`,
+`storage/`) contained stub `main.tf` files with only provider blocks and no real resource
+declarations. Root `outputs.tf` referenced hardcoded `"example.com"` strings.
+`terraform validate` failed because the output references resolved to nothing.
+
+What changed:
+
+**networking module** (`modules/networking/main.tf`, `variables.tf`, `outputs.tf`):
+- `aws_vpc.main` — VPC with `enable_dns_support` and `enable_dns_hostnames` (required for
+  RDS hostname resolution and ECS service discovery).
+- `aws_internet_gateway.main` — attached to the VPC.
+- `aws_subnet.public[0,1]` — 2 public subnets across `var.availability_zones`, CIDRs derived
+  from the VPC block with `cidrsubnet(var.vpc_cidr, 8, count.index + 1)`. Set
+  `map_public_ip_on_launch = true`.
+- `aws_subnet.private[0,1]` — 2 private subnets, CIDRs offset at `count.index + 10`.
+- `aws_route_table.public` + association — routes `0.0.0.0/0` through the IGW for public
+  subnets. Private subnets have no route table in Phase 1 (no NAT Gateway).
+- `aws_security_group.compute` — ECS Fargate tasks: unrestricted egress, no ingress (tasks
+  run in private subnets and are not directly reachable from the internet in Phase 1).
+- `aws_security_group.database` — RDS: TCP 5432 ingress only from `aws_security_group.compute`;
+  unrestricted egress.
+- Outputs: `vpc_id`, `public_subnet_ids`, `private_subnet_ids`, `compute_security_group_id`,
+  `db_security_group_id`.
+
+**compute module** (`modules/compute/`):
+- `aws_ecs_cluster.main` — ECS Fargate cluster (Container Insights disabled for Phase 1 cost).
+- `aws_iam_role.ecs_task_execution_role` + `AmazonECSTaskExecutionRolePolicy` attachment —
+  standard execution role for ECR image pull and CloudWatch Logs.
+- `aws_iam_role.ecs_task_role` + inline policy — task-level role granting
+  `s3:GetObject / PutObject / DeleteObject` on `arn:aws:s3:::${var.s3_bucket_name}/*`.
+- `aws_ecs_task_definition.backend` — Fargate Linux x86_64, CPU and memory from variables;
+  single container (`backend`) with the full env var set: `DATABASE_URL`, `REDIS_URL`,
+  `MINIO_ENDPOINT` → S3 bucket name for Phase 1, `JWT_SECRET_KEY`, `CELERY_BROKER_URL`,
+  `CELERY_RESULT_BACKEND`, `S3_BUCKET_NAME`.
+- `aws_ecs_service.backend` — desired count from variable; deployed to private subnets with
+  the compute SG; no load balancer in Phase 1.
+- Outputs: `ecs_cluster_id`, `ecs_service_name`, `task_role_arn`.
+
+**database module** (`modules/database/`):
+- `aws_db_subnet_group.main` — spans both private subnets.
+- `aws_db_parameter_group.main` — PostgreSQL 15, no custom parameters in Phase 1.
+- `aws_db_instance.main` — db.t3.micro, PostgreSQL 15.5, 20 GiB gp2, no multi-AZ, no
+  deletion protection (dev environment), placed in the DB subnet group with the DB SG.
+- Outputs: `db_address`, `db_port`, `db_endpoint`.
+
+**storage module** (`modules/storage/`):
+- `aws_s3_bucket.resumes` — bucket for resume file storage.
+- `aws_s3_bucket_versioning.resumes` — enabled on the bucket.
+- `aws_iam_policy.task_bucket_access` + attachment — grants `s3:GetObject / PutObject /
+  DeleteObject` on the bucket to the compute task role (passed in as `var.task_role_arn`).
+- Outputs: `bucket_name`.
+
+**Root wiring** (`main.tf`, `outputs.tf`, `variables.tf`, `terraform.tfvars.example`):
+- `main.tf` — four module calls with explicit input wiring. A `locals` block derives
+  `bucket_name = "${var.app_name}-${var.environment}-resumes"` (see Why section below).
+  A comment block at the top documents the deployment target, Phase 1 boundary, and Phase 2
+  deferred items (ALB, NAT Gateway, WAF, CDN, Secrets Manager).
+- `outputs.tf` — all five outputs now reference real module/resource expressions:
+  `module.compute.ecs_cluster_id`, `module.compute.ecs_service_name`,
+  `module.database.db_endpoint`, `module.networking.vpc_id`,
+  `module.networking.public_subnet_ids`.
+- `variables.tf` — all root variables declared: `app_name`, `environment`, `region`,
+  `vpc_cidr`, `availability_zones`, `db_password`, `db_name`, `db_username`,
+  `backend_image`, `task_cpu`, `task_memory`, `desired_count`.
+- `terraform.tfvars.example` — lists every required and optional variable with inline
+  documentation and safe Phase 1 defaults.
+
+`terraform init -backend=false` and `terraform validate` both pass.
+
+Why security groups in the networking module and not in compute/database?
+
+The database module's security group ingress rule must reference the compute security group
+by ID (`security_groups = [aws_security_group.compute.id]`). If the compute SG lived inside
+the compute module, database would need an input variable containing the compute SG ID —
+making database depend on compute. Compute already depends on networking (for VPC ID and
+private subnet IDs). If any compute output were needed by database (or vice versa), the
+graph would gain a cycle. Placing both SGs in the networking module, which has no other
+module dependencies, keeps the dependency graph acyclic: networking ← database and
+networking ← compute, with no edge between database and compute.
+
+Why a `locals` block for the bucket name in root `main.tf`?
+
+The compute module needs the bucket name to inject it as `S3_BUCKET_NAME` into the ECS task
+environment. The storage module needs the bucket name to provision the bucket. The natural
+alternative — have storage export `bucket_name` and compute import it — would add a
+storage→compute dependency on top of the existing compute→storage dependency (task role
+ARN), completing a cycle. Deriving the name in a root `locals` block keeps both modules
+independent: each receives the name as a plain input variable with no module edges between
+them.
+
+Why no ALB and no NAT Gateway in Phase 1?
+
+An ALB adds Route 53, ACM certificates, target group health checks, and listener rules —
+substantial scope beyond the core infrastructure validation goal. A NAT Gateway costs ~$32/month
+before data transfer charges; private tasks that only need to reach VPC-internal services
+(RDS) or S3/ECR via VPC endpoints (not yet added) do not require it. Both are explicitly
+listed as Phase 2 additions in the root `main.tf` header comment.
+
+Real issues encountered:
+
+Terraform reported a dependency cycle when the compute SG was initially defined inside the
+compute module and the database module's ingress rule referenced it. Moving both SGs to the
+networking module resolved the cycle. The bucket name `locals` pattern was adopted for the
+same reason after the first `terraform validate` run flagged the storage↔compute cycle.
+
+What future contributors should understand:
+
+Any new security group whose ingress or egress rules reference a SG from another module
+must be added to the networking module. The pattern to check: if a SG rule contains
+`security_groups = [some_other_sg.id]` and that SG belongs to a different module, move it
+to networking.
+
+If Phase 2 adds an ALB, the ALB SG also belongs in networking. The ECS service will need a
+`load_balancer` block referencing the ALB target group, which is a compute module concern.
+That introduces a networking→compute output edge; the wiring should be validated with
+`terraform plan` before merging.
+
+Any new value that two sibling modules both need as a constant should be derived in root
+`locals`, not threaded through one module's output and into the other's input.
+
+### 12.46 Issue #105 — Phase 1 resume workflow frontend (PR #121)
+
+Before this PR, the resume list page showed a dead "New Resume" button that fired
+`alert("TODO: Create resume flow — Phase 1 Sprint 3")`. There were no routes beyond
+`/resumes`. The backend already had the full Phase 1 resume API wired up.
+
+What changed:
+
+**Updated — `frontend/src/app/resumes/page.tsx`:**
+
+Replaced the `alert()` stub with a `NewResumeModal` component rendered conditionally when
+`showModal === true`. The modal:
+- fetches the user's jobs list via `useQuery` and populates an optional `<select>` dropdown
+- calls `POST /api/v1/resumes` with `{ job_id: selectedId | null }`
+- navigates to `/resumes/{resume.id}` on success via `useRouter().push()`
+- surfaces `ApiRequestError.detail` inline; submit button is disabled during the request
+
+Each resume list item is now wrapped in an `<a href="/resumes/{id}">` link.
+
+**New — `frontend/src/app/resumes/[resume_id]/page.tsx`:**
+
+Single-page workflow with four sections:
+
+*Generate Bullets* — form with entity type `<select>` (work_experience / project), entity UUID
+text input, and a textarea for requirement IDs (one per line or comma-separated). On submit:
+splits and trims IDs, calls `POST /api/v1/resumes/{resume_id}/bullets/generate` with
+`BulletsGenerateRequest`. Error handling: HTTP 429 → "Rate limit reached"; HTTP 402 →
+"Daily AI budget exceeded"; other errors → `err.detail` from `ApiRequestError`. New bullets
+are merged into state (deduped by `id`) without replacing any existing items.
+
+*Current Bullets* — renders from `useState<ResumeBulletRead[]>` (see Why section). Each
+row shows text, confidence %, an Approved/Pending badge, and an AI badge. Per-row Approve
+button (hidden when `is_approved === true`) calls `PATCH /approve` with no body and updates
+the item in state with the returned `ResumeBulletRead`. Per-row Delete button calls
+`DELETE /{bullet_id}` and filters the item from state.
+
+*Snapshot Version* — button calls `POST /api/v1/resumes/{resume_id}/versions` with `{}`.
+On success: green confirmation message, `queryClient.invalidateQueries({ queryKey: ["versions"] })`.
+On error: red message from `ApiRequestError.detail`.
+
+*Version History* — `useQuery` fetches `GET /api/v1/resumes/versions` and the result is
+filtered client-side by `v.resume_id === resumeId`. Each item is a link to
+`/resumes/versions/{version_id}` showing job title, company, creation date, and fit score
+percentage. Loading and empty states handled.
+
+**New — `frontend/src/app/resumes/versions/[version_id]/page.tsx`:**
+
+`useQuery` fetches `GET /api/v1/resumes/versions/{version_id}` → `ResumeVersionDetailRead`.
+Renders a two-column metadata grid (job_title, job_company, fit_score, created_at). Lists
+bullets with text, confidence %, and evidence items (`source_entity_type: display_name`).
+Loading, error, and empty-bullets states all handled.
+
+**Updated — `frontend/src/types/index.ts`:**
+
+Added: `ResumeRead`, `ResumeBulletRead`, `BulletsGenerateRequest`, `EvidenceLinkRead`,
+`ResumeBulletWithEvidence`, `ResumeVersionListItem`, `ResumeVersionDetailRead`. Existing
+`Resume`, `ResumeVersion`, and `ResumeBullet` interfaces kept intact (already matched the
+backend schema; the new `ResumeRead` / `ResumeBulletRead` names align with backend naming).
+
+**`frontend/src/lib/` force-re-tracked:**
+
+Even though ADR-049 documented that `frontend/src/lib/` was force-tracked in PR #119, the
+issue-105 worktree was created from the `main` branch before that PR was merged. The lib
+files were absent from the worktree's git index and had to be force-added again with
+`git add -f`. This confirms the follow-up item from ADR-049: the root `.gitignore` should
+scope its `lib/` exclusion to Python artifact directories only.
+
+Why local React state for bullets instead of a `useQuery`?
+
+There is no `GET /api/v1/resumes/{resume_id}/bullets` endpoint. Bullets are only returned
+as the response body of the POST generate call. Storing them in `useState` and merging new
+generate responses (deduplicated by `id`) gives users a live view of all bullets generated
+in the current session. An alternative approach of re-calling the generate POST to "refresh"
+was rejected because it would create new AI bullets rather than re-reading existing ones,
+and would consume AI budget on every page navigation.
+
+Why does the Approve button send no request body?
+
+The backend's `PATCH /{id}/bullets/{bullet_id}/approve` endpoint signature has no
+`data: ResumeBulletApprove` body parameter — the schema class `ResumeBulletApprove` exists
+in `schemas/resume.py` but was not wired into the endpoint handler. The endpoint always
+sets `is_approved = True` (ADR-037). The frontend reflects the actual backend contract:
+Approve appears only when `is_approved === false`; Delete is the rejection mechanism.
+
+Why filter version history client-side?
+
+`GET /api/v1/resumes/versions` returns all versions for the authenticated user with no
+`?resume_id=` filter parameter. Filtering the returned list by `resume_id` in JavaScript is
+correct for Phase 1 volume (default page size 20 items). If version counts grow beyond the
+default page size, a backend `?resume_id=` query parameter should be added.
+
+Real issues encountered:
+
+The backend approve endpoint takes no body despite the issue spec noting `{ is_approved: boolean }`.
+This was discovered by reading `backend/app/api/v1/endpoints/resumes.py`. The
+`ResumeBulletApprove` Pydantic schema exists but is unused in the endpoint. The one-way
+approve design is consistent with ADR-037's description of "approval as an in-place
+mutation."
+
+The lib files were absent from the worktree even after ADR-049 established they were
+force-tracked. The worktree predated the force-add commit on main, requiring another
+`git add -f` pass.
+
+What future contributors should understand:
+
+If a `GET /api/v1/resumes/{resume_id}/bullets` endpoint is added, replace the `useState`
+bullet list with a `useQuery` keyed on `["bullets", resumeId]`. Call
+`queryClient.invalidateQueries({ queryKey: ["bullets", resumeId] })` after each approve or
+delete instead of updating state manually.
+
+The `BulletsGenerateRequest.requirement_ids` field accepts any string that parses as a
+UUID. Validation is server-side; the textarea parsing intentionally delegates format
+checking to the backend 422 response rather than adding client-side UUID regex
+validation.
