@@ -4042,7 +4042,7 @@ What changed:
 - **networking/main.tf** — VPC (10.0.0.0/16 default), two public subnets and two private
   subnets (one per AZ), Internet Gateway, public route table with associations, and two
   security groups: `compute` (egress-only, attached to ECS Fargate tasks) and `database`
-  (port 5432 ingress from the compute SG only). All four SGs live here — not in the
+  (port 5432 ingress from the compute SG only). Both SGs live here — not in the
   functional modules — to break the circular dependency between compute and database (see
   ADR-050).
 
