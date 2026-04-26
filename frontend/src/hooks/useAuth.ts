@@ -52,9 +52,16 @@ export function useAuth() {
     setState({ user, isLoading: false, isAuthenticated: true });
   }, []);
 
-  const logout = useCallback(() => {
-    clearTokens();
-    setState({ user: null, isLoading: false, isAuthenticated: false });
+  const logout = useCallback(async () => {
+    try {
+      await api.post("/api/v1/auth/logout", undefined, { skipAuth: false });
+    } catch {
+      // Best-effort — always clear local state even if the server call fails.
+      // A network error or 401 should not trap the user in the authenticated state.
+    } finally {
+      clearTokens();
+      setState({ user: null, isLoading: false, isAuthenticated: false });
+    }
   }, []);
 
   return {
