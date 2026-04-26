@@ -1693,3 +1693,55 @@ cross-stack visibility not present during single-feature PR review).
 - Future phase-completion audits should check at minimum: TODO/FIXME/alert() in
   frontend, bare `except: pass` in workers, hooks that export functions never called in
   any page, and CI jobs that pass with zero test files.
+
+---
+
+## ADR-053 — Logout is best-effort server call with guaranteed local state reset
+
+**Date:** 2026-04-26 (PR #134, issue #128)  
+**Status:** Accepted
+
+**Context:**  
+`useAuth.logout()` previously cleared local tokens without contacting the backend, leaving
+the httpOnly refresh token cookie alive. The backend `POST /api/v1/auth/logout` endpoint
+(issue #9) already existed to invalidate server-side refresh tokens and clear the cookie,
+but was never called from the frontend. Three design questions arose when wiring it up:
+error handling strategy, explicit vs. implicit auth header, and where redirect logic lives.
+
+**Decision 1 — Best-effort server call; local state reset is unconditional (`finally`):**
+
+The server logout call is wrapped in `try/catch/finally`. The `finally` block always runs
+`clearTokens()` and resets auth state, regardless of whether the API call succeeded or
+threw. The alternative — only clearing local state after a confirmed server response —
+would trap users in the authenticated UI whenever the network is unavailable or the access
+token has already expired. A briefly lingering refresh cookie is a lower-severity problem
+than an unusable logout button. If the access token is expired, the server returns 401;
+the `catch {}` absorbs it and `finally` still clears local state.
+
+**Decision 2 — Pass `skipAuth: false` explicitly:**
+
+The `api.post` wrapper attaches the Bearer token by default (`skipAuth` defaults to
+`false`). Passing `skipAuth: false` explicitly is redundant but intentional: it makes the
+contrast with `POST /api/v1/auth/login` (which uses `skipAuth: true`) immediately visible
+during code review, communicating that this endpoint requires an authenticated caller.
+
+**Decision 3 — No redirect logic in the hook:**
+
+`useAuth` manages auth state; navigation is the caller's responsibility. Adding
+`useRouter().push("/auth/login")` inside the hook would couple it to the Next.js App
+Router, break testability in non-router contexts, and violate single-responsibility.
+The Nav component (issue #129) awaits `logout()` and handles the redirect. Future callers
+that need different post-logout behavior (e.g., a settings page that redirects elsewhere)
+can do so without changing the hook.
+
+**Consequences:**
+- Server-side refresh tokens are invalidated on logout when a valid access token is
+  present. The httpOnly cookie is cleared via the `Set-Cookie` response header.
+- If the access token is expired at logout time, the server call fails silently. The
+  refresh cookie expires on its own schedule. This is an acceptable residual risk given
+  that the access token lifetime is short (configured in the backend).
+- `logout()` now returns `Promise<void>`. Callers that don't `await` it are unaffected.
+  Callers that do `await` it (Nav, issue #129) can redirect only after the server has
+  responded and local state is cleared.
+- The ordering constraint — API call before `clearTokens()` — must be preserved. Calling
+  `clearTokens()` first would remove the token needed to authenticate the server request.
