@@ -1555,29 +1555,95 @@ need `-f` until the `.gitignore` is corrected with a path-prefixed rule.
 
 ---
 
-## ADR-050 — Phase 1 Terraform: security groups live in the networking module
+## ADR-050 — Terraform: security groups in networking module, shared scalar values in root locals
 
 **Date:** 2026-04-24 (PR #120, issue #107)  
 **Status:** Accepted
 
 **Context:**  
-Issue #107 replaced the four Terraform module stubs with real resource declarations. Two modules created a circular dependency: the database module needed the compute security group ID to restrict RDS ingress, while the compute module needed the RDS endpoint to construct the `DATABASE_URL` container environment variable. Neither module could be instantiated before the other.
+Issue #107 implemented all four Phase 1 AWS Terraform modules (networking, compute, database,
+storage). Two structural questions arose when wiring the modules together:
 
-**Decision:**  
-Security groups for both the compute tier (ECS Fargate tasks) and the database tier (RDS) are declared in the networking module, not in their respective functional modules.
+1. The database security group's ingress rule references the compute security group by ID.
+   If each SG lives in its "owner" module, Terraform's dependency graph must represent a
+   database→compute edge. Combined with the existing compute→networking edge, any compute
+   output needed by database (or vice versa) would create a cycle.
 
-- `aws_security_group.compute` — egress-only; attached to ECS tasks.
-- `aws_security_group.database` — allows port 5432 ingress from `aws_security_group.compute` only.
+2. Both the compute module (env var injection into the ECS task) and the storage module
+   (bucket provisioning and policy) need the S3 bucket name. Threading it as an output of
+   one module and an input of the other creates the same cycle risk as the SG problem:
+   compute→storage already exists (task role ARN); adding storage→compute would complete
+   the loop.
 
-The networking module outputs both IDs (`compute_security_group_id`, `db_security_group_id`). The root module passes `compute_security_group_id` to both the compute and database modules. The database module outputs `db_address` (hostname-only), which the root module passes into compute for `DATABASE_URL` construction. This breaks the circular dependency at the root level.
+**Decision 1 — All security groups live in the networking module:**  
+`modules/networking/` defines every security group regardless of which tier it protects.
+The networking module has no dependencies on any sibling module. It exports SG IDs as
+outputs; compute and database consume those IDs as input variables. No module-to-module SG
+reference exists outside the networking module boundary.
 
-A `locals` block in root `main.tf` derives the shared S3 bucket name so both compute (for the IAM task role policy) and storage (for the bucket resource itself) can reference the same value without a circular dependency between those two modules.
-
-**Phase 1 support boundary:** no Application Load Balancer, no NAT Gateway, no WAF, no Secrets Manager. `backend_url` output references the ECS service name (not a public URL) until Phase 2 wires an ALB. Database credentials are passed as task-definition environment variables; migrate to AWS Secrets Manager before staging or production.
+**Decision 2 — Cross-module shared scalar values are derived in root `locals`:**  
+`locals.bucket_name = "${var.app_name}-${var.environment}-resumes"` is computed in root
+`main.tf` and passed as an input to both the compute and storage modules. Neither module
+references the other. The value is a pure function of root variables — no module output is
+needed to derive it.
 
 **Consequences:**  
-- The module dependency graph is acyclic: `networking → {database, compute}`, `compute → storage`.
-- Security group rules that span two functional modules (compute ↔ database) are co-located in the networking module, which is the natural home for cross-cutting network policy.
-- Any new module that needs to communicate with an existing tier must request its security group ID from the networking module rather than declaring a new group independently — keeps all inter-tier rules visible in one place.
-- Phase 2 ALB addition: create an `aws_security_group.alb` in networking, update `compute` to allow ingress from the ALB SG, and replace the `backend_url` output with the ALB DNS name.
+- Any new security group whose rules reference a SG from another module must be added to
+  the networking module. The right question is "does this SG rule reference another module's
+  SG?" not "which tier owns this SG?"
+- Phase 2 additions (ALB SG, WAF, VPN) follow the same pattern — they belong in networking
+  regardless of which other module they interact with.
+- Any constant needed by two sibling modules should be expressed in root `locals`, not
+  exported from one module and imported by the other.
+- `terraform validate` is the authoritative check for cycles — a cycle error is the signal
+  to apply one of these two patterns, not to relax module boundaries.
 
+---
+
+## ADR-051 — Resume workflow frontend: local bullet state, approve-only, client-side version filter
+
+**Date:** 2026-04-24 (PR #121, issue #105)  
+**Status:** Accepted
+
+**Context:**  
+Issue #105 required a frontend workflow covering bullet generation, approval/rejection,
+version snapshot, and version history. Three backend API constraints drove design decisions
+on the frontend:
+
+1. No `GET /api/v1/resumes/{resume_id}/bullets` endpoint exists. Bullets are only returned
+   as the response body of `POST /{resume_id}/bullets/generate`.
+2. `PATCH /{resume_id}/bullets/{bullet_id}/approve` takes no request body and unconditionally
+   sets `is_approved = True`. There is no un-approve endpoint (see ADR-037).
+3. `GET /api/v1/resumes/versions` returns all versions for the authenticated user with no
+   `?resume_id=` filter parameter.
+
+**Decision 1 — Bullets are managed in local React state:**  
+`useState<ResumeBulletRead[]>` is initialized empty. Each generate response is merged into
+state (deduped by `id`). Approve updates the matching element in state with the returned
+`ResumeBulletRead`. Delete removes it from state. This gives users a live view of all
+bullets generated in the current session.
+
+Calling the generate POST again to "refresh" was rejected: it is a write operation that
+produces new AI-generated bullets and consumes token budget; it is not a read.
+
+**Decision 2 — Approve is one-directional; Delete is rejection:**  
+The Approve button renders only when `bullet.is_approved === false`. The PATCH call sends
+no body. There is no Unapprove button. This mirrors the backend contract (ADR-037:
+"approval is an in-place mutation: `is_approved = True`"). Delete (HTTP 204) removes the
+row and its EvidenceLink children via ON DELETE CASCADE.
+
+**Decision 3 — Version history is filtered client-side by `resume_id`:**  
+The all-versions response from `GET /api/v1/resumes/versions` is filtered in JavaScript by
+`v.resume_id === resumeId` on the workflow page. This is correct for Phase 1 volume (default
+page size 20). The backend endpoint does not support a `?resume_id=` parameter.
+
+**Consequences:**  
+- Bullet state is session-ephemeral: navigating away and back resets the list. If users need
+  to see previously generated bullets across sessions, a `GET /bullets` endpoint must be
+  added and the `useState` replaced with `useQuery`.
+- The no-body approve call is correct for the current backend. If the backend later adds
+  `is_approved: bool` as a body parameter or an un-approve endpoint, the frontend call site
+  and button logic must both be updated.
+- The client-side version filter is a Phase 1 shortcut. If version history grows beyond the
+  default page size, a `?resume_id=` query parameter should be added to the backend endpoint
+  and the client updated to pass it.
