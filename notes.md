@@ -4264,3 +4264,38 @@ The `BulletsGenerateRequest.requirement_ids` field accepts any string that parse
 UUID. Validation is server-side; the textarea parsing intentionally delegates format
 checking to the backend 422 response rather than adding client-side UUID regex
 validation.
+
+---
+
+## 13. Phase 1 audit — open items (2026-04-26)
+
+A full pass of the codebase after the last four concurrent PRs landed (#119 job
+detail, #120 Terraform, #121 resume workflow, #122 AI resolver) identified six
+gaps that were not covered by the original E0–E9 issue set.
+
+### What is complete
+
+Every backend epic has shipped: auth (E1), profile CRUD (E2), file upload pipeline (E3),
+job analysis (E4), resume generation (E5), version history (E6), AI cost model (E7),
+security baseline (E8), and DevOps baseline (E9). All Alembic migrations are clean.
+The frontend has login, register, dashboard, full profile CRUD, job list and detail,
+resume workflow (create → generate → approve → snapshot → history), and version detail.
+
+### Open items (tracked as GitHub issues)
+
+| Issue | Area | Priority | What is missing |
+|-------|------|----------|-----------------|
+| #127 | backend | P1 bug | `parse_job` Celery task has `except Exception: pass` — all non-transient AI errors are silently dropped. Job stays unparsed with no log. |
+| #128 | frontend security | P1 | `useAuth.logout()` only calls `clearTokens()`. Never calls `POST /auth/logout`. Refresh token stays valid in the database after the user "logs out." |
+| #129 | frontend UX | P1 | No persistent navigation bar exists anywhere in the layout. Users cannot navigate between sections or sign out without knowing URL paths. |
+| #130 | frontend UX | P2 | Resume bullet generation form accepts raw UUID text input for profile entity and requirement IDs. Unusable without dropdowns for work experiences, projects, and job requirements. |
+| #131 | frontend | P2 | Backend file upload pipeline (E3) is fully functional. No frontend UI exists for `POST /api/v1/files`. Users cannot import profile data from a resume PDF. |
+| #132 | frontend quality | P2 | Jest is configured and CI runs it, but zero `.test.ts` / `.test.tsx` files exist. CI passes vacuously. `src/lib/api.ts` and `src/hooks/useAuth.ts` are the highest-priority units to cover. |
+
+### Recommended resolution order
+
+#128 (security, one method call) → #127 (bug, error logging + one test) →
+#129 (depends on #128 for the logout button call) → #130 → #131 → #132.
+
+Issues #128 and #127 are the only ones with correctness and security consequences.
+The rest are UX quality and testing work to round out Phase 1.

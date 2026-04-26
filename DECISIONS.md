@@ -1647,3 +1647,49 @@ page size 20). The backend endpoint does not support a `?resume_id=` parameter.
 - The client-side version filter is a Phase 1 shortcut. If version history grows beyond the
   default page size, a `?resume_id=` query parameter should be added to the backend endpoint
   and the client updated to pass it.
+
+---
+
+## ADR-052 — Phase 1 audit: six open items classified and tracked as GitHub issues
+
+**Date:** 2026-04-26  
+**Status:** Accepted
+
+**Context:**  
+After PRs #119–#122 merged (job detail page, Terraform, resume workflow, AI provider
+resolver), a systematic pass of the full Phase 1 codebase found six gaps that the original
+E0–E9 epic set did not cover. These were not caught during individual PR reviews because
+they required reading across the entire stack at once rather than reviewing one feature in
+isolation.
+
+**Decision:**  
+Each gap is tracked as a standalone GitHub issue with explicit acceptance criteria. They are
+classified by priority and domain:
+
+| Issue | Domain | Priority | Root cause |
+|-------|--------|----------|------------|
+| #127 | backend bug | P1 | `parse_job` Celery task has `except Exception: pass` — silent failure with no log |
+| #128 | frontend security | P1 | `useAuth.logout()` never calls `POST /auth/logout` — refresh token survives "logout" |
+| #129 | frontend UX | P1 | No persistent navigation bar — users cannot move between sections or sign out |
+| #130 | frontend UX | P2 | Resume bullet generation requires raw UUID inputs — profile entity and job requirement selectors needed |
+| #131 | frontend | P2 | File upload backend (E3) is complete; no frontend UI exists |
+| #132 | frontend quality | P2 | Jest configured in CI but zero test files exist — `lib/api.ts` and `useAuth` are highest priority |
+
+Recommended resolution order: #128 → #127 → #129 (logout button depends on #128) →
+#130 → #131 → #132.
+
+**Why record this as an ADR?**  
+The audit itself is a repeatable process that should be run at the end of every phase.
+Recording what was found and how items were triaged provides a template for future audits
+and explains why these issues exist at this point in the project timeline (they require
+cross-stack visibility not present during single-feature PR review).
+
+**Consequences:**  
+- Issues #127 and #128 must be resolved before Phase 1 is considered production-ready:
+  silent task failures and an incomplete logout flow are correctness and security defects,
+  not cosmetic gaps.  
+- Issues #129–#132 are quality and UX work; the product is functional without them but
+  not professionally complete.  
+- Future phase-completion audits should check at minimum: TODO/FIXME/alert() in
+  frontend, bare `except: pass` in workers, hooks that export functions never called in
+  any page, and CI jobs that pass with zero test files.
