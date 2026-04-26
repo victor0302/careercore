@@ -172,3 +172,29 @@ What to remember next time:
   discovering conflicts with docs-103 and issue-104 branches)
 - `skip_final_snapshot = true` and `deletion_protection = false` are Phase 1
   dev defaults; they must be reversed before any staging deploy
+
+### Phase 1 audit — 2026-04-26
+
+What was done:
+- audited the full codebase after PRs #119, #120, #121, #122 landed
+  (job detail page, Terraform, resume workflow, AI provider resolver)
+- compared the closed issue set (E0–E9, 103+ issues) against actual code state
+- identified six gaps not covered by the original issue set
+- created GitHub issues #127–#132
+
+What mattered:
+- every backend epic is complete; all gaps are frontend-side or a backend bug
+- issue #127 (silent Celery exception swallowing) and #128 (logout not calling
+  backend) are the only ones with correctness and security consequences
+- issues #129–#132 are UX and quality work
+- recommended fix order: #128 → #127 → #129 → #130 → #131 → #132
+
+What to remember next time:
+- before declaring a phase complete, do a focused audit against the original
+  epic acceptance criteria and scan for: TODO comments, `alert(...)`, bare
+  `except: pass`, functions exported from hooks that are never called anywhere,
+  CI jobs that pass with zero test files
+- concurrent worktrees for the four preceding PRs (#119–#122) worked without
+  merge conflicts because each touched disjoint areas (frontend/app/jobs,
+  infra/terraform, frontend/app/resumes, backend/app/ai) with the single
+  exception of frontend/src/types/index.ts, which required a manual merge
