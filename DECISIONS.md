@@ -1802,3 +1802,61 @@ Next.js App Router.
 - The inline SVG is dependency-free; replace it with a library icon if the project adopts
   one (Lucide, Heroicons).
 - The `isLoading → null` guard is load-bearing and must not be removed.
+
+---
+
+## ADR-056 — Bullet generation selectors: dependent queries, requirement_id vs id, three-way requirements branch
+
+**Date:** 2026-04-27 (PR #139, issue #130)  
+**Status:** Accepted
+
+**Context:**  
+The resume workflow page's "Generate Bullets" section previously exposed raw UUID inputs
+that required users to know internal database identifiers. Three design decisions arose
+when replacing them with live-data selectors: how to handle the resume→job dependency
+chain, which field to use as the checkbox value for requirements, and how to handle the
+three distinct states of the job/analysis relationship.
+
+**Decision 1 — Dependent query chain via `enabled: !!jobId`:**
+
+The job detail query (`GET /api/v1/jobs/{job_id}`) cannot run until `job_id` is known,
+which requires the resume record (`GET /api/v1/resumes/{resume_id}`). TanStack Query v5's
+`enabled` option is the idiomatic mechanism for dependent queries. Setting
+`enabled: !!jobId` means the query does not fire when `jobId` is `null` (resume has no
+linked job) or `undefined` (resume not yet fetched). The alternative — fetching job detail
+unconditionally with a null-safe path — would produce a spurious `GET /api/v1/jobs/null`
+request on every page load for resumes without a linked job.
+
+**Decision 2 — Use `requirement_id` (FK), not `id` (row PK), as the checkbox value:**
+
+`MatchedRequirementRead` and `MissingRequirementRead` both have an `id` field (the primary
+key of the analysis match/gap table row) and a `requirement_id` field (FK to
+`job_requirements.id`). `BulletsGenerateRequest.requirement_ids` accepts
+`job_requirements` PKs — i.e., `requirement_id`. Using `id` would send the wrong
+identifier and the backend would fail silently or return a 404. The two UUID fields look
+identical in the UI, making this a high-likelihood future mistake; the correct field is
+named explicitly in the toggle handler and the task description.
+
+**Decision 3 — Three-way branch for the requirements input:**
+
+The requirements input needs to handle three distinct states that cannot be collapsed:
+
+| State | Condition | UI |
+|---|---|---|
+| No linked job | `jobId === null` | Textarea fallback with manual paste |
+| Job not analyzed | `jobId` set, `latest_analysis === null` | Informational notice, no input |
+| Analysis available | `latest_analysis` present | Scrollable checkbox list |
+
+Collapsing the first two states (showing the textarea whenever there are no checkboxes)
+would be misleading: when the job exists but is unanalyzed, showing a textarea implies
+the user should manually paste IDs, when the correct action is to run analysis first.
+Separating them gives the user actionable guidance in each case.
+
+**Consequences:**
+- Resumes without a linked job continue to work via the textarea fallback; no regressions
+  for that use case.
+- The `["jobs", jobId]` query key uses `jobId` as its second segment. If `jobId` changes
+  (future reassignment feature), the query automatically re-fetches from cache.
+- Any refactor of the requirements selector must preserve `requirement_id` as the value,
+  not `id`. This is documented in the component and in this ADR.
+- The entity type change resets `selectedEntityId` to prevent cross-type UUID reuse.
