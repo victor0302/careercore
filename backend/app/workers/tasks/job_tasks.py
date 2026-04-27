@@ -1,10 +1,13 @@
 """Job parsing Celery tasks."""
 
 import asyncio
+import logging
 import uuid
 
 from botocore.exceptions import BotoCoreError
 from sqlalchemy.exc import SQLAlchemyError
+
+logger = logging.getLogger(__name__)
 
 from app.db.session import AsyncSessionLocal
 from app.workers.celery_app import celery_app
@@ -42,4 +45,9 @@ def parse_job(self: "celery_app.Task", job_id: str, user_id: str) -> None:  # ty
         if retries < max_retries:
             raise self.retry(exc=exc)
     except Exception:
-        pass
+        logger.error(
+            "parse_job failed (non-transient) — job_id=%s user_id=%s",
+            job_id,
+            user_id,
+            exc_info=True,
+        )

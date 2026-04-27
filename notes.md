@@ -4443,3 +4443,116 @@ What future contributors should understand:
 - The `_TRANSIENT_EXCEPTIONS` tuple is the only place to add exception types that
   should trigger a retry. Do not broaden it to include AI-layer exceptions; those
   are not transient in the way that network or database errors are.
+
+### 12.49 Issue #129 — Persistent navigation header with logout button (PR #137)
+
+Before this PR, every page was isolated. There was no navigation chrome — users had to know
+URLs to move between sections. The `useAuth` hook exposed `logout()` but nothing in the app
+called it. Each page rendered its own full-screen layout with no shared header.
+
+What changed:
+
+**New — `frontend/src/components/Nav.tsx`:**
+
+A `"use client"` component responsible for the entire navigation bar. It is the only new
+client component in this PR; `layout.tsx` remains a server component.
+
+Auth-gating: calls `useAuth()` immediately. Returns `null` if `isLoading` is true (prevents
+a layout flash while auth state resolves on first mount) or if `!isAuthenticated` (auth
+pages at `/auth/*` render cleanly with no nav bar). No redirects happen inside this
+component; it is purely presentational.
+
+Structure when authenticated:
+- `<header className="border-b border-border bg-background">` wrapping a constrained
+  `<nav className="mx-auto max-w-4xl px-4 h-14 ...">`.
+- Left: a `<Link href="/dashboard">` brand with `font-semibold text-foreground`.
+- Center (desktop only, `hidden md:flex`): `<Link>` elements for Dashboard, Profile, Jobs,
+  Resumes. Link data lives in a module-level `NAV_LINKS` constant so adding a new section
+  is a one-line change.
+- Right: a "Sign out" `<button>` always visible; a hamburger `<button>` visible only on
+  mobile (`md:hidden`).
+
+Active route detection — `isActive(href)`:
+```ts
+pathname === href || pathname.startsWith(href + "/")
+```
+`usePathname()` from `"next/navigation"` provides the current pathname. The `startsWith`
+check ensures `/jobs/some-uuid` highlights Jobs, `/resumes/some-uuid/versions` highlights
+Resumes, etc. Active links get `font-semibold text-foreground`; inactive links get
+`text-muted-foreground hover:text-foreground transition-colors`.
+
+Sign out behavior:
+```ts
+const handleLogout = async () => {
+  await logout();          // calls POST /auth/logout + clears tokens (ADR-053)
+  router.push("/auth/login");
+};
+```
+`router.push` runs only after `logout()` resolves, so the redirect always happens after
+local state is cleared and the server has been notified (or the call has failed and been
+swallowed). This is the post-logout redirect caller described in ADR-053 Decision 3.
+
+Mobile responsive: `useState(false)` controls a `menuOpen` flag. When `true`, a `<div>`
+drawer renders below the header bar with `md:hidden border-t border-border` containing all
+four nav links stacked vertically. Each link closes the drawer on click via
+`onClick={() => setMenuOpen(false)}`. The hamburger uses an inline SVG (three `<line>`
+elements, `stroke="currentColor"`) with `aria-label="Toggle navigation menu"` on the button
+and `aria-hidden="true"` on the SVG. No third-party library is involved.
+
+**Updated — `frontend/src/app/layout.tsx`:**
+
+```tsx
+import { Nav } from "@/components/Nav";
+
+<Providers>
+  <Nav />
+  {children}
+</Providers>
+```
+
+`Nav` is rendered inside `<Providers>` so that `useAuth`'s internal hooks have access to
+the React Query client context. The layout file itself remains a React server component.
+
+Why return `null` during `isLoading` instead of a skeleton?
+
+The auth state resolution is fast (a single `sessionStorage` read + one `/api/v1/auth/me`
+call). A skeleton would flash a partial UI before the nav either appears or disappears.
+Returning `null` is invisible; there is no perceivable pop-in on authenticated pages because
+the nav appears once after state resolves.
+
+Why `pathname.startsWith(href + "/")` and not just `pathname.includes(href)`?
+
+`includes` would incorrectly highlight Dashboard on any path containing the string
+"dashboard" anywhere. Anchoring with `+ "/"` ensures a true path-prefix match:
+`/dashboard/settings` matches `/dashboard`; `/jobs/123` does not partially match `/job`.
+
+Why put redirect logic in Nav and not in `useAuth`?
+
+Covered by ADR-053 Decision 3: `useAuth` manages state, navigation is the caller's
+responsibility. Putting `router.push` in the hook would couple it to the Next.js App
+Router, making it non-portable and harder to test. A future settings page can call
+`await logout()` and redirect somewhere different without changing the hook.
+
+Why no icon library?
+
+No icon library is installed in the project and the task explicitly prohibits introducing
+third-party dependencies. Text labels are accessible and consistent with the rest of the UI.
+The hamburger is an inline SVG — zero additional dependencies.
+
+Real issues encountered:
+
+`node_modules` were not present in the worktree (gitignored). `npm install --prefer-offline`
+was run to install them for the TypeScript check; the resulting `package-lock.json`
+normalization (a `"peer": true` metadata field on one dev dependency) was committed with
+the feature files.
+
+What future contributors should understand:
+
+`NAV_LINKS` at the top of `Nav.tsx` is the single place to add or remove nav entries.
+The active-link logic works for any path depth automatically.
+
+If a protected route should not appear in the global nav (e.g., an admin panel), do not
+add it to `NAV_LINKS` — render a context-specific nav inside that route's layout instead.
+
+The `isLoading` guard is essential. Without it, the nav would briefly flash visible on the
+login page for the fraction of a second before `!isAuthenticated` evaluates to true.
