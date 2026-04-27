@@ -4493,3 +4493,61 @@ derived from the `["resumes", resumeId]` query result, which is in the query cac
 The textarea fallback for the no-job case is intentional: it preserves backward
 compatibility for resumes that are not linked to a specific job posting, which is a
 valid use case (e.g., a general-purpose resume).
+
+### 12.51 Issue #131 — File upload UI for resume PDF extraction (PR #142)
+
+Before this PR the backend file pipeline (upload, extraction, status) was fully
+implemented but there was no frontend surface for it. Users had no way to import a
+résumé without writing raw API calls.
+
+What changed:
+
+- Added `FileUploadResponse` interface to `frontend/src/types/index.ts` (`id`, `status`,
+  `filename`) matching the backend `POST /api/v1/files` response schema.
+- Added `FileUploadSection` component in `frontend/src/app/profile/page.tsx`, inserted
+  between `BasicInfoSection` and the tabbed section in `ProfilePage`.
+- Client-side validation runs on file selection (not on submit), rejecting non-PDF/DOCX
+  MIME types and files over 10 MB immediately with clear error messages.
+- Upload uses `fetch` directly instead of `api.post`. The `api` wrapper always sets
+  `Content-Type: application/json`, which would override the browser-generated
+  `multipart/form-data` boundary and break the upload. Native `fetch` with no
+  `Content-Type` header lets the browser set it correctly (see ADR-057).
+- Status-code-to-message mapping: 413 → file too large, 415 → unsupported type, 401 →
+  session expired, other → parses `{detail}` from the JSON response body.
+- `GET /api/v1/files` does not exist in Phase 1. Previously uploaded files cannot be
+  listed from the backend. The component tracks files uploaded in the current browser
+  session using `useState<FileUploadResponse[]>` and displays them with a note:
+  "Showing files uploaded this session. Refresh the page to see extraction results."
+  (see ADR-057).
+- File input resets after a successful upload via an incrementing `key` prop
+  (`inputKey` state) — cleaner than `ref.current.value = ""` for controlled React
+  inputs.
+- `tsc --noEmit` passes with zero errors.
+
+Why native `fetch` and not `api.post`:
+
+`api.ts` always calls `JSON.stringify(body)` and sets `Content-Type: application/json`.
+For `FormData`, this produces a malformed request body (the stringified `[object FormData]`
+literal) with the wrong content type. The backend responds 422 or 400 because it receives
+JSON instead of a multipart stream. Using native `fetch` without a manual `Content-Type`
+header causes the browser to generate the correct `multipart/form-data; boundary=…`
+header automatically.
+
+Why session-local state and not a list query:
+
+The backend `GET /api/v1/files` endpoint is not implemented in Phase 1. Calling it would
+return a 404 on every page load. Session-local state gives the user immediate feedback on
+files they have just uploaded without creating a permanently broken query. The Phase 2
+work item is to implement the list endpoint and replace the local state with a TanStack
+Query `useQuery`.
+
+What future contributors should understand:
+
+- When adding any multipart or binary upload endpoint, always use native `fetch` — never
+  route through `api.ts`. Add a comment at the call site referencing ADR-057.
+- The `FileUploadResponse.status` field reflects the backend `filestatus` enum
+  (`pending` → `processing` → `ready` | `error`). Do not infer status from the upload
+  response alone; it will always be `pending` at that point.
+- The session-local file list is intentionally ephemeral. Refreshing the page clears it.
+  This is documented in the UI. Phase 2 must add `GET /api/v1/files` and replace this
+  with a real query.
