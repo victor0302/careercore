@@ -4299,3 +4299,89 @@ resume workflow (create → generate → approve → snapshot → history), and 
 
 Issues #128 and #127 are the only ones with correctness and security consequences.
 The rest are UX quality and testing work to round out Phase 1.
+
+### 12.47 Issue #128 — Call backend logout endpoint from useAuth (PR #134)
+
+Before this PR, `useAuth.logout()` only called `clearTokens()` to remove the access token
+from `sessionStorage` and reset React state. It never contacted the backend. The httpOnly
+refresh token cookie the server set during login continued to live in the browser —
+untouched and still valid. Any client that retained the cookie (same browser tab after
+soft navigation, another tab, or a script with access to the cookie jar) could silently
+call `POST /api/v1/auth/refresh` and obtain a new access token, bypassing the logout
+entirely.
+
+What changed:
+
+Only `frontend/src/hooks/useAuth.ts` was modified. The `logout` callback was updated from
+a synchronous `() => void` to an `async () => Promise<void>`:
+
+```ts
+const logout = useCallback(async () => {
+  try {
+    await api.post("/api/v1/auth/logout", undefined, { skipAuth: false });
+  } catch {
+    // Best-effort — always clear local state even if the server call fails.
+    // A network error or 401 should not trap the user in the authenticated state.
+  } finally {
+    clearTokens();
+    setState({ user: null, isLoading: false, isAuthenticated: false });
+  }
+}, []);
+```
+
+The backend endpoint (`POST /api/v1/auth/logout`, implemented in issue #9 / PR #57)
+requires a valid Bearer access token, marks every active refresh token for the user as
+used in the database, and clears the httpOnly refresh cookie via a `Set-Cookie: ...; Max-Age=0`
+response header. Calling it from the frontend closes the server-side session.
+
+Why `finally` for `clearTokens()` and state reset?
+
+The server call is best-effort. If the network is down, the token is already expired, or
+the server returns a 401, the user must still be logged out of the local UI. Trapping the
+user in the authenticated state because of a failed server call would be worse than leaving
+a briefly lingering refresh cookie. The `finally` block guarantees that local state is
+always cleared, regardless of whether the server call succeeded.
+
+Why `skipAuth: false` explicitly?
+
+`false` is already the default in the `api.post` wrapper (the Bearer token is attached
+unless `skipAuth: true` is passed). Passing it explicitly makes the intent visible in code
+review: this endpoint requires authentication and the token must be sent. The contrast with
+`POST /api/v1/auth/login` — which passes `skipAuth: true` because no token exists yet —
+is immediately apparent.
+
+Why not add redirect logic inside the hook?
+
+The hook's responsibility is managing auth state, not navigation. Adding `useRouter()` and
+a `router.push("/auth/login")` call would couple the hook to the Next.js App Router,
+making it harder to test and harder to use in contexts that handle navigation differently.
+Issue #129 (Nav component) is the correct place for post-logout redirect logic — it calls
+`await logout()` and then pushes to `/auth/login`.
+
+Why does the return type change from `() => void` to `() => Promise<void>`?
+
+Callers that do not `await` the returned promise are unaffected — they fire the async
+function and continue. Callers that do `await` it (like the Nav component in issue #129)
+gain the ability to redirect only after the server has confirmed the logout and the local
+state has been cleared. This is a non-breaking widening of the contract.
+
+Real issues encountered:
+
+Node modules were not installed in the CI environment for the worktree, so `npx tsc --noEmit`
+could not run. The change is a minimal, mechanical transformation (sync → async + try/catch/finally)
+with no new imports and no changed type signatures beyond the async wrapper, making
+manual type soundness verification straightforward.
+
+What future contributors should understand:
+
+`POST /api/v1/auth/logout` requires the `Authorization: Bearer <token>` header. If
+`clearTokens()` were called before the API call, the token would be gone and the request
+would be unauthenticated, causing a 401 and leaving the refresh cookie alive. The current
+ordering — API call first, `clearTokens()` in `finally` — is intentional and must be
+preserved.
+
+If the access token has already expired at the time of logout (e.g., a 30-minute session
+timeout), the server will return 401. The `catch {}` block absorbs this silently and the
+`finally` block still clears local state. The refresh cookie in this scenario will expire
+on its own schedule — the server-side invalidation only succeeds when a valid access token
+is present.
