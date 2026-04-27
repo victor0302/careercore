@@ -4385,3 +4385,61 @@ timeout), the server will return 401. The `catch {}` block absorbs this silently
 `finally` block still clears local state. The refresh cookie in this scenario will expire
 on its own schedule — the server-side invalidation only succeeds when a valid access token
 is present.
+
+### 12.48 Issue #127 — Log non-transient parse_job exceptions instead of silently swallowing
+
+Before this fix, `parse_job` in `backend/app/workers/tasks/job_tasks.py` had a bare
+`except Exception: pass` that silently discarded every non-transient failure. Any AI
+error (`InvalidOutputError`, `RateLimitError`, `ProviderUnavailableError`), `ValueError`
+from argument parsing, or unexpected model output would leave the job row with
+`parsed_at = None` and produce no trace in logs. There was no way to distinguish "task
+never ran" from "task ran and failed".
+
+What changed:
+
+- Added `import logging` and `logger = logging.getLogger(__name__)` at the top of
+  `job_tasks.py`.
+- Replaced `except Exception: pass` with:
+  ```python
+  except Exception:
+      logger.error(
+          "parse_job failed (non-transient) — job_id=%s user_id=%s",
+          job_id,
+          user_id,
+          exc_info=True,
+      )
+  ```
+  The function still returns normally — per ADR-046, job creation must succeed
+  regardless of whether parsing succeeds.
+- The `_TRANSIENT_EXCEPTIONS` retry branch (`BotoCoreError`, `SQLAlchemyError`) is
+  unchanged.
+- New test file `backend/tests/unit/workers/test_parse_job_task.py` with three tests
+  following the same `run.__func__` / `monkeypatch` pattern as
+  `test_extraction_tasks.py`:
+  - `test_parse_job_logs_non_transient_exception` — verifies one `logger.error` call
+    with `job_id`, `user_id`, and `exc_info=True`; function returns `None`.
+  - `test_parse_job_retries_on_transient_exception` — `SQLAlchemyError` raises
+    `celery.exceptions.Retry`.
+  - `test_parse_job_does_not_retry_on_non_transient_exception` — `ValueError` does not
+    propagate out of the task.
+
+Why not re-raise or retry on non-transient exceptions?
+
+ADR-046 deliberately isolates the HTTP creation response from AI provider health. A
+`ValueError` from malformed model output or an `InvalidOutputError` are not recoverable
+by retrying — they are product-state failures that leave the job in an unparsed state.
+The manual `POST /jobs/{id}/parse` endpoint exists precisely for recovery. What was
+missing was observability: operators had no log evidence that a failure occurred.
+`logger.error(exc_info=True)` gives Celery worker logs the full traceback without
+changing the task's external contract.
+
+What future contributors should understand:
+
+- Any exception that reaches `logger.error` here will appear in the worker container's
+  stdout/stderr and in whatever log aggregation system (CloudWatch, Datadog, etc.) is
+  configured for the Celery worker. No additional instrumentation is needed.
+- The `exc_info=True` kwarg is required — without it the log line has the message but
+  no traceback, which makes debugging impossible.
+- The `_TRANSIENT_EXCEPTIONS` tuple is the only place to add exception types that
+  should trigger a retry. Do not broaden it to include AI-layer exceptions; those
+  are not transient in the way that network or database errors are.
