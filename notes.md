@@ -4385,3 +4385,111 @@ timeout), the server will return 401. The `catch {}` block absorbs this silently
 `finally` block still clears local state. The refresh cookie in this scenario will expire
 on its own schedule — the server-side invalidation only succeeds when a valid access token
 is present.
+
+### 12.50 Issue #130 — Resume bullet generation entity/requirement selectors (PR #139)
+
+Before this PR, the "Generate Bullets" section on the resume workflow page had two raw
+UUID text inputs that no real user could fill in: a text field labeled "Profile Entity ID
+(UUID)" and a textarea labeled "Requirement IDs (one per line or comma-separated)." Both
+required knowing internal database UUIDs by heart. This PR replaces both with selectors
+driven by live API data.
+
+What changed (frontend/src/app/resumes/[resume_id]/page.tsx only):
+
+**New queries:**
+
+Four new `useQuery` calls were added alongside the existing `versionsKey` query:
+
+- `["resumes", resumeId]` → `GET /api/v1/resumes/{resume_id}` → `ResumeRead`. The resume
+  record is needed solely to obtain `job_id`, which gates the job detail query.
+- `["profile", "experience"]` → `GET /api/v1/profile/experience` → `WorkExperience[]`.
+  Fetched unconditionally so the dropdown is ready when the user selects Work Experience.
+- `["profile", "projects"]` → `GET /api/v1/profile/projects` → `Project[]`. Same pattern.
+- `["jobs", jobId]` → `GET /api/v1/jobs/{jobId}` → `JobDetailRead`. Gated with
+  `enabled: !!jobId` — only fires when the resume has a linked job.
+
+**State changes:**
+
+Removed `entityId: string` and `requirementsRaw: string`.
+Added `selectedEntityId: string` (defaults `""`), `selectedRequirementIds: string[]`
+(defaults `[]`), and `rawIds: string` (fallback textarea for the no-job case).
+
+**Entity dropdown:**
+
+The `entityType` select already existed. The new entity dropdown below it renders
+differently based on `entityType`:
+- `"work_experience"` → options from `experiences`, labeled `"{role_title} at {employer}"`,
+  value = `experience.id`
+- `"project"` → options from `projects`, labeled `project.name`, value = `project.id`
+
+Changing `entityType` resets `selectedEntityId` to `""` so the previous selection is
+not silently carried over to a different entity type.
+Shows "Loading..." while the relevant query has not resolved.
+
+**Requirements selector — three-way branch:**
+
+1. `jobId === null` (resume has no linked job): renders the original textarea bound to
+   `rawIds`. Parsed the same way as before (`split(/[\n,]+/)`, trim, filter). Shows a
+   notice: "This resume has no linked job. Paste requirement IDs manually."
+
+2. `jobId` is set but `jobDetail?.latest_analysis` is null (job exists but not analyzed):
+   renders an informational notice: "Job has not been analyzed yet — run analysis from
+   the Jobs page first." No input is rendered.
+
+3. `jobDetail.latest_analysis` is present: renders a scrollable checkbox list (max height
+   16rem, overflow-y scroll). Matched requirements are labeled
+   `"{match_type} — {confidence}% confidence"`. Missing requirements are labeled
+   `"Missing — {suggested_action ?? 'No suggestion'}"` in amber. Checkbox `value` and
+   the toggle handler both use `requirement_id` (the FK to the `JobRequirement` row),
+   not `id` (the `JobAnalysisMatch` / `JobAnalysisGap` row ID). `requirement_id` is
+   what `BulletsGenerateRequest.requirement_ids` expects.
+
+**handleGenerate update:**
+
+The requirement IDs are assembled from `selectedRequirementIds` when `jobId` is set, or
+from the parsed `rawIds` fallback when it is not. Two client-side guards run before the
+API call: if `selectedEntityId` is empty, or if the assembled `requirementIds` array is
+empty, an error is shown and submission is aborted. The `BulletsGenerateRequest` body and
+all downstream logic are unchanged.
+
+Why `enabled: !!jobId` instead of always fetching job detail?
+
+Resumes can exist without a linked job (the `job_id` column is nullable). Without the
+guard, `GET /api/v1/jobs/null` would fire on every page load, return a 422/404, and log
+an error. `enabled: !!jobId` is TanStack Query v5's idiomatic way to express a dependent
+query.
+
+Why `requirement_id` and not `id` for checkbox values?
+
+`MatchedRequirementRead.id` is the primary key of the `job_analysis_matches` table row.
+`MatchedRequirementRead.requirement_id` is the FK that references `job_requirements.id`.
+`BulletsGenerateRequest.requirement_ids` is documented as a list of `job_requirements`
+PKs. Using `id` would send the wrong foreign key and the backend would fail to find the
+requirements. The field names are similar enough that this is a common mistake; the
+comment is left in the checkbox render to make the intent clear.
+
+Why reset `selectedEntityId` on `entityType` change?
+
+A work experience ID and a project ID are both UUIDs. Without a reset, switching from
+"Work Experience" to "Project" would silently carry over a work experience UUID as the
+selected project entity ID, causing a backend 404 or ownership error when generating.
+
+Real issues encountered:
+
+Node modules were not installed in the worktree environment, so `npx tsc --noEmit` could
+not run. The types are straightforward: all new query results are typed against existing
+interfaces from `@/types`, the checkbox toggle uses `string[]` state, and the three-way
+branch is plain conditional JSX with no new generic type parameters.
+
+What future contributors should understand:
+
+The requirements checkbox list uses `requirement_id` (FK), not `id` (row PK). This
+distinction must be preserved if the selector is ever refactored or extended.
+
+If the resume's `job_id` changes (e.g., a reassignment endpoint is added), the
+`["jobs", jobId]` query will automatically invalidate and re-fetch because `jobId` is
+derived from the `["resumes", resumeId]` query result, which is in the query cache.
+
+The textarea fallback for the no-job case is intentional: it preserves backward
+compatibility for resumes that are not linked to a specific job posting, which is a
+valid use case (e.g., a general-purpose resume).
