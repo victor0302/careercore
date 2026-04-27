@@ -8,6 +8,10 @@ import type {
   ResumeBulletRead,
   BulletsGenerateRequest,
   ResumeVersionListItem,
+  ResumeRead,
+  WorkExperience,
+  Project,
+  JobDetailRead,
 } from "@/types";
 
 function BulletRow({
@@ -101,8 +105,9 @@ export default function ResumeWorkflowPage() {
 
   const [bullets, setBullets] = useState<ResumeBulletRead[]>([]);
   const [entityType, setEntityType] = useState<"work_experience" | "project">("work_experience");
-  const [entityId, setEntityId] = useState("");
-  const [requirementsRaw, setRequirementsRaw] = useState("");
+  const [selectedEntityId, setSelectedEntityId] = useState("");
+  const [selectedRequirementIds, setSelectedRequirementIds] = useState<string[]>([]);
+  const [rawIds, setRawIds] = useState("");
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
 
@@ -116,19 +121,58 @@ export default function ResumeWorkflowPage() {
     queryFn: () => api.get<ResumeVersionListItem[]>("/api/v1/resumes/versions"),
   });
 
+  const { data: resume } = useQuery({
+    queryKey: ["resumes", resumeId],
+    queryFn: () => api.get<ResumeRead>(`/api/v1/resumes/${resumeId}`),
+  });
+
+  const jobId = resume?.job_id ?? null;
+
+  const { data: experiences } = useQuery({
+    queryKey: ["profile", "experience"],
+    queryFn: () => api.get<WorkExperience[]>("/api/v1/profile/experience"),
+  });
+
+  const { data: projects } = useQuery({
+    queryKey: ["profile", "projects"],
+    queryFn: () => api.get<Project[]>("/api/v1/profile/projects"),
+  });
+
+  const { data: jobDetail } = useQuery({
+    queryKey: ["jobs", jobId],
+    queryFn: () => api.get<JobDetailRead>(`/api/v1/jobs/${jobId}`),
+    enabled: !!jobId,
+  });
+
   const resumeVersions = allVersions?.filter((v) => v.resume_id === resumeId) ?? [];
+
+  const toggleRequirement = (reqId: string) => {
+    setSelectedRequirementIds((prev) =>
+      prev.includes(reqId) ? prev.filter((id) => id !== reqId) : [...prev, reqId]
+    );
+  };
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
     setGenerateError(null);
+
+    const requirementIds = jobId
+      ? selectedRequirementIds
+      : rawIds.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+
+    if (!selectedEntityId.trim()) {
+      setGenerateError("Please select a profile entity.");
+      return;
+    }
+    if (requirementIds.length === 0) {
+      setGenerateError("Please select at least one requirement.");
+      return;
+    }
+
     setIsGenerating(true);
-    const requirementIds = requirementsRaw
-      .split(/[\n,]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
     const body: BulletsGenerateRequest = {
       profile_entity_type: entityType,
-      profile_entity_id: entityId.trim(),
+      profile_entity_id: selectedEntityId.trim(),
       requirement_ids: requirementIds,
     };
     try {
@@ -182,6 +226,9 @@ export default function ResumeWorkflowPage() {
     }
   };
 
+  const SELECT_CLS =
+    "w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
+
   return (
     <main className="mx-auto max-w-3xl px-4 py-10 space-y-10">
       <div>
@@ -202,42 +249,126 @@ export default function ResumeWorkflowPage() {
             </div>
           )}
 
+          {/* Entity type */}
           <div className="space-y-1">
             <label className="text-sm font-medium">Profile Entity Type</label>
             <select
               value={entityType}
-              onChange={(e) => setEntityType(e.target.value as "work_experience" | "project")}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              onChange={(e) => {
+                setEntityType(e.target.value as "work_experience" | "project");
+                setSelectedEntityId("");
+              }}
+              className={SELECT_CLS}
             >
               <option value="work_experience">Work Experience</option>
               <option value="project">Project</option>
             </select>
           </div>
 
+          {/* Entity dropdown */}
           <div className="space-y-1">
-            <label className="text-sm font-medium">Profile Entity ID (UUID)</label>
-            <input
-              type="text"
-              required
-              value={entityId}
-              onChange={(e) => setEntityId(e.target.value)}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-              placeholder="e.g. 3fa85f64-5717-4562-b3fc-2c963f66afa6"
-            />
+            <label className="text-sm font-medium">Profile Entity</label>
+            {entityType === "work_experience" ? (
+              experiences ? (
+                <select
+                  value={selectedEntityId}
+                  onChange={(e) => setSelectedEntityId(e.target.value)}
+                  className={SELECT_CLS}
+                >
+                  <option value="">— select work experience —</option>
+                  {experiences.map((exp) => (
+                    <option key={exp.id} value={exp.id}>
+                      {exp.role_title} at {exp.employer}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <p className="text-sm text-muted-foreground">Loading...</p>
+              )
+            ) : projects ? (
+              <select
+                value={selectedEntityId}
+                onChange={(e) => setSelectedEntityId(e.target.value)}
+                className={SELECT_CLS}
+              >
+                <option value="">— select project —</option>
+                {projects.map((proj) => (
+                  <option key={proj.id} value={proj.id}>
+                    {proj.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p className="text-sm text-muted-foreground">Loading...</p>
+            )}
           </div>
 
-          <div className="space-y-1">
-            <label className="text-sm font-medium">
-              Requirement IDs (one per line or comma-separated)
-            </label>
-            <textarea
-              required
-              rows={4}
-              value={requirementsRaw}
-              onChange={(e) => setRequirementsRaw(e.target.value)}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-              placeholder={"req-uuid-1\nreq-uuid-2"}
-            />
+          {/* Requirements selector */}
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Requirements</label>
+
+            {!jobId ? (
+              /* No linked job — fallback to manual textarea */
+              <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">
+                  This resume has no linked job. Paste requirement IDs manually.
+                </p>
+                <textarea
+                  rows={4}
+                  value={rawIds}
+                  onChange={(e) => setRawIds(e.target.value)}
+                  className={`${SELECT_CLS} font-mono`}
+                  placeholder={"req-uuid-1\nreq-uuid-2"}
+                />
+              </div>
+            ) : !jobDetail?.latest_analysis ? (
+              /* Job exists but not analyzed yet */
+              <p className="rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+                Job has not been analyzed yet — run analysis from the Jobs page first.
+              </p>
+            ) : (
+              /* Analysis available — checkbox list */
+              <ul className="space-y-2 rounded-md border border-border p-3 max-h-64 overflow-y-auto">
+                {jobDetail.latest_analysis.matched_requirements.map((req) => (
+                  <li key={req.id} className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      id={`req-${req.id}`}
+                      value={req.requirement_id}
+                      checked={selectedRequirementIds.includes(req.requirement_id)}
+                      onChange={() => toggleRequirement(req.requirement_id)}
+                      className="mt-0.5 shrink-0"
+                    />
+                    <label htmlFor={`req-${req.id}`} className="text-sm cursor-pointer">
+                      <span className="capitalize">{req.match_type.replace(/_/g, " ")}</span>
+                      {" — "}
+                      <span className="text-muted-foreground">
+                        {Math.round(req.confidence * 100)}% confidence
+                      </span>
+                    </label>
+                  </li>
+                ))}
+                {jobDetail.latest_analysis.missing_requirements.map((req) => (
+                  <li key={req.id} className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      id={`req-${req.id}`}
+                      value={req.requirement_id}
+                      checked={selectedRequirementIds.includes(req.requirement_id)}
+                      onChange={() => toggleRequirement(req.requirement_id)}
+                      className="mt-0.5 shrink-0"
+                    />
+                    <label htmlFor={`req-${req.id}`} className="text-sm cursor-pointer text-amber-700 dark:text-amber-400">
+                      Missing — {req.suggested_action ?? "No suggestion"}
+                    </label>
+                  </li>
+                ))}
+                {jobDetail.latest_analysis.matched_requirements.length === 0 &&
+                  jobDetail.latest_analysis.missing_requirements.length === 0 && (
+                    <li className="text-sm text-muted-foreground">No requirements found in analysis.</li>
+                  )}
+              </ul>
+            )}
           </div>
 
           <button
