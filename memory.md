@@ -199,6 +199,35 @@ What to remember next time:
   infra/terraform, frontend/app/resumes, backend/app/ai) with the single
   exception of frontend/src/types/index.ts, which required a manual merge
 
+### Issue #127 — Log non-transient parse_job exceptions
+
+What was done:
+- added `logger = logging.getLogger(__name__)` to `job_tasks.py`
+- replaced `except Exception: pass` with `logger.error(..., exc_info=True)`;
+  function still returns normally (no re-raise, per ADR-046)
+- created `tests/unit/workers/test_parse_job_task.py` with three tests using
+  the `run.__func__` / `monkeypatch` / `SimpleNamespace` pattern from
+  `test_extraction_tasks.py`
+- ran tests via `PYTHONPATH=backend /home/vic/careercore/backend/.venv/bin/pytest` —
+  all 3 pass (uv build fails due to pre-existing `setuptools.backends` issue)
+- opened PR #135
+
+What mattered:
+- the fix is logging only — do not re-raise or retry non-transient exceptions;
+  ADR-046 requires job creation to succeed regardless of AI availability
+- `exc_info=True` is mandatory; without it you get the message but no traceback
+- `_TRANSIENT_EXCEPTIONS = (BotoCoreError, SQLAlchemyError)` must stay narrow;
+  AI-layer errors are not transient and must not be added here
+
+What to remember next time:
+- `run.__func__(task_instance, *args)` is the correct way to unit-test a
+  bound Celery task function without a real broker
+- `celery.exceptions.Retry` is what `self.retry(exc=exc)` raises — the fake
+  `self.retry` in tests must raise it, not return it
+- the `uv` venv build fails on this repo with `setuptools.backends` not found;
+  use the main worktree's `.venv/bin/pytest` with `PYTHONPATH` set to the
+  target worktree's `backend/` directory
+
 ### Issue #131 — File upload UI for resume PDF extraction
 
 What was done:

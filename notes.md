@@ -4386,6 +4386,177 @@ timeout), the server will return 401. The `catch {}` block absorbs this silently
 on its own schedule — the server-side invalidation only succeeds when a valid access token
 is present.
 
+### 12.48 Issue #127 — Log non-transient parse_job exceptions instead of silently swallowing
+
+Before this fix, `parse_job` in `backend/app/workers/tasks/job_tasks.py` had a bare
+`except Exception: pass` that silently discarded every non-transient failure. Any AI
+error (`InvalidOutputError`, `RateLimitError`, `ProviderUnavailableError`), `ValueError`
+from argument parsing, or unexpected model output would leave the job row with
+`parsed_at = None` and produce no trace in logs. There was no way to distinguish "task
+never ran" from "task ran and failed".
+
+What changed:
+
+- Added `import logging` and `logger = logging.getLogger(__name__)` at the top of
+  `job_tasks.py`.
+- Replaced `except Exception: pass` with:
+  ```python
+  except Exception:
+      logger.error(
+          "parse_job failed (non-transient) — job_id=%s user_id=%s",
+          job_id,
+          user_id,
+          exc_info=True,
+      )
+  ```
+  The function still returns normally — per ADR-046, job creation must succeed
+  regardless of whether parsing succeeds.
+- The `_TRANSIENT_EXCEPTIONS` retry branch (`BotoCoreError`, `SQLAlchemyError`) is
+  unchanged.
+- New test file `backend/tests/unit/workers/test_parse_job_task.py` with three tests
+  following the same `run.__func__` / `monkeypatch` pattern as
+  `test_extraction_tasks.py`:
+  - `test_parse_job_logs_non_transient_exception` — verifies one `logger.error` call
+    with `job_id`, `user_id`, and `exc_info=True`; function returns `None`.
+  - `test_parse_job_retries_on_transient_exception` — `SQLAlchemyError` raises
+    `celery.exceptions.Retry`.
+  - `test_parse_job_does_not_retry_on_non_transient_exception` — `ValueError` does not
+    propagate out of the task.
+
+Why not re-raise or retry on non-transient exceptions?
+
+ADR-046 deliberately isolates the HTTP creation response from AI provider health. A
+`ValueError` from malformed model output or an `InvalidOutputError` are not recoverable
+by retrying — they are product-state failures that leave the job in an unparsed state.
+The manual `POST /jobs/{id}/parse` endpoint exists precisely for recovery. What was
+missing was observability: operators had no log evidence that a failure occurred.
+`logger.error(exc_info=True)` gives Celery worker logs the full traceback without
+changing the task's external contract.
+
+What future contributors should understand:
+
+- Any exception that reaches `logger.error` here will appear in the worker container's
+  stdout/stderr and in whatever log aggregation system (CloudWatch, Datadog, etc.) is
+  configured for the Celery worker. No additional instrumentation is needed.
+- The `exc_info=True` kwarg is required — without it the log line has the message but
+  no traceback, which makes debugging impossible.
+- The `_TRANSIENT_EXCEPTIONS` tuple is the only place to add exception types that
+  should trigger a retry. Do not broaden it to include AI-layer exceptions; those
+  are not transient in the way that network or database errors are.
+
+### 12.49 Issue #129 — Persistent navigation header with logout button (PR #137)
+
+Before this PR, every page was isolated. There was no navigation chrome — users had to know
+URLs to move between sections. The `useAuth` hook exposed `logout()` but nothing in the app
+called it. Each page rendered its own full-screen layout with no shared header.
+
+What changed:
+
+**New — `frontend/src/components/Nav.tsx`:**
+
+A `"use client"` component responsible for the entire navigation bar. It is the only new
+client component in this PR; `layout.tsx` remains a server component.
+
+Auth-gating: calls `useAuth()` immediately. Returns `null` if `isLoading` is true (prevents
+a layout flash while auth state resolves on first mount) or if `!isAuthenticated` (auth
+pages at `/auth/*` render cleanly with no nav bar). No redirects happen inside this
+component; it is purely presentational.
+
+Structure when authenticated:
+- `<header className="border-b border-border bg-background">` wrapping a constrained
+  `<nav className="mx-auto max-w-4xl px-4 h-14 ...">`.
+- Left: a `<Link href="/dashboard">` brand with `font-semibold text-foreground`.
+- Center (desktop only, `hidden md:flex`): `<Link>` elements for Dashboard, Profile, Jobs,
+  Resumes. Link data lives in a module-level `NAV_LINKS` constant so adding a new section
+  is a one-line change.
+- Right: a "Sign out" `<button>` always visible; a hamburger `<button>` visible only on
+  mobile (`md:hidden`).
+
+Active route detection — `isActive(href)`:
+```ts
+pathname === href || pathname.startsWith(href + "/")
+```
+`usePathname()` from `"next/navigation"` provides the current pathname. The `startsWith`
+check ensures `/jobs/some-uuid` highlights Jobs, `/resumes/some-uuid/versions` highlights
+Resumes, etc. Active links get `font-semibold text-foreground`; inactive links get
+`text-muted-foreground hover:text-foreground transition-colors`.
+
+Sign out behavior:
+```ts
+const handleLogout = async () => {
+  await logout();          // calls POST /auth/logout + clears tokens (ADR-053)
+  router.push("/auth/login");
+};
+```
+`router.push` runs only after `logout()` resolves, so the redirect always happens after
+local state is cleared and the server has been notified (or the call has failed and been
+swallowed). This is the post-logout redirect caller described in ADR-053 Decision 3.
+
+Mobile responsive: `useState(false)` controls a `menuOpen` flag. When `true`, a `<div>`
+drawer renders below the header bar with `md:hidden border-t border-border` containing all
+four nav links stacked vertically. Each link closes the drawer on click via
+`onClick={() => setMenuOpen(false)}`. The hamburger uses an inline SVG (three `<line>`
+elements, `stroke="currentColor"`) with `aria-label="Toggle navigation menu"` on the button
+and `aria-hidden="true"` on the SVG. No third-party library is involved.
+
+**Updated — `frontend/src/app/layout.tsx`:**
+
+```tsx
+import { Nav } from "@/components/Nav";
+
+<Providers>
+  <Nav />
+  {children}
+</Providers>
+```
+
+`Nav` is rendered inside `<Providers>` so that `useAuth`'s internal hooks have access to
+the React Query client context. The layout file itself remains a React server component.
+
+Why return `null` during `isLoading` instead of a skeleton?
+
+The auth state resolution is fast (a single `sessionStorage` read + one `/api/v1/auth/me`
+call). A skeleton would flash a partial UI before the nav either appears or disappears.
+Returning `null` is invisible; there is no perceivable pop-in on authenticated pages because
+the nav appears once after state resolves.
+
+Why `pathname.startsWith(href + "/")` and not just `pathname.includes(href)`?
+
+`includes` would incorrectly highlight Dashboard on any path containing the string
+"dashboard" anywhere. Anchoring with `+ "/"` ensures a true path-prefix match:
+`/dashboard/settings` matches `/dashboard`; `/jobs/123` does not partially match `/job`.
+
+Why put redirect logic in Nav and not in `useAuth`?
+
+Covered by ADR-053 Decision 3: `useAuth` manages state, navigation is the caller's
+responsibility. Putting `router.push` in the hook would couple it to the Next.js App
+Router, making it non-portable and harder to test. A future settings page can call
+`await logout()` and redirect somewhere different without changing the hook.
+
+Why no icon library?
+
+No icon library is installed in the project and the task explicitly prohibits introducing
+third-party dependencies. Text labels are accessible and consistent with the rest of the UI.
+The hamburger is an inline SVG — zero additional dependencies.
+
+Real issues encountered:
+
+`node_modules` were not present in the worktree (gitignored). `npm install --prefer-offline`
+was run to install them for the TypeScript check; the resulting `package-lock.json`
+normalization (a `"peer": true` metadata field on one dev dependency) was committed with
+the feature files.
+
+What future contributors should understand:
+
+`NAV_LINKS` at the top of `Nav.tsx` is the single place to add or remove nav entries.
+The active-link logic works for any path depth automatically.
+
+If a protected route should not appear in the global nav (e.g., an admin panel), do not
+add it to `NAV_LINKS` — render a context-specific nav inside that route's layout instead.
+
+The `isLoading` guard is essential. Without it, the nav would briefly flash visible on the
+login page for the fraction of a second before `!isAuthenticated` evaluates to true.
+
 ### 12.50 Issue #130 — Resume bullet generation entity/requirement selectors (PR #139)
 
 Before this PR, the "Generate Bullets" section on the resume workflow page had two raw

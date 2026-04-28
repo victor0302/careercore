@@ -1748,6 +1748,63 @@ can do so without changing the hook.
 
 ---
 
+## ADR-055 — Nav component: null-render auth guard, startsWith active detection, inline-SVG hamburger
+
+**Date:** 2026-04-27 (PR #137, issue #129)  
+**Status:** Accepted
+
+**Context:**  
+Issue #129 added a persistent navigation header to the Next.js App Router root layout.
+Three design questions needed explicit decisions: how to gate the nav on auth state without
+causing a flash or breaking auth pages, how to detect the active route correctly across
+nested paths, and how to implement a responsive mobile menu without a third-party library.
+
+**Decision 1 — Return `null` during loading and when unauthenticated:**
+
+`Nav` calls `useAuth()` first. If `isLoading` is `true` it returns `null`; if
+`!isAuthenticated` it also returns `null`. No skeleton, no placeholder, no redirect.
+
+The alternative — rendering a loading skeleton — would produce a visible flicker: the
+skeleton appears, then is replaced by the real nav (authenticated) or nothing (auth pages).
+Because auth state resolves quickly (a `sessionStorage` read + one API call), returning
+`null` is invisible. The `isLoading` guard is required: without it, the nav momentarily
+renders as unauthenticated (before the effect runs), producing a flash on authenticated
+pages or a brief nav appearance on the login page.
+
+**Decision 2 — Active route detection uses `pathname === href || pathname.startsWith(href + "/")`:**
+
+`pathname.includes(href)` was rejected: it would activate the Jobs link on any path
+containing the string "jobs" anywhere. The exact-match-or-prefix approach is unambiguous —
+only paths that are the link's exact route or a strict child trigger the active style.
+The `+ "/"` suffix prevents false positives from paths that share a string prefix but are
+not children (e.g., a hypothetical `/resumes-archived` would not match `/resumes`).
+
+**Decision 3 — Mobile menu is a `useState`-toggled drawer with an inline SVG hamburger:**
+
+A `menuOpen: boolean` state variable controls a `<div>` beneath the header that stacks the
+four nav links vertically on `md:hidden` viewports. Each link closes the drawer on click.
+The hamburger uses a hand-authored three-line SVG with `aria-label` on the button and
+`aria-hidden` on the SVG. No icon library is introduced (prohibited by the issue spec).
+
+A CSS-only toggle (checkbox hack) was rejected for broken keyboard navigation in some
+browsers. Always-visible stacked links were rejected for the vertical space cost on mobile.
+
+**Decision 4 — `Nav` is rendered inside `<Providers>`, not outside:**
+
+`useAuth` depends on the React Query client provided by `<Providers>`. Rendering `Nav`
+outside `<Providers>` would throw at runtime. `layout.tsx` itself remains a server
+component — importing a client component from a server component is supported by the
+Next.js App Router.
+
+**Consequences:**
+- Auth pages render without any nav bar with no special casing needed in those pages.
+- Adding a new top-level nav entry is a one-line change to `NAV_LINKS` in `Nav.tsx`.
+- The inline SVG is dependency-free; replace it with a library icon if the project adopts
+  one (Lucide, Heroicons).
+- The `isLoading → null` guard is load-bearing and must not be removed.
+
+---
+
 ## ADR-056 — Bullet generation selectors: dependent queries, requirement_id vs id, three-way requirements branch
 
 **Date:** 2026-04-27 (PR #139, issue #130)  
