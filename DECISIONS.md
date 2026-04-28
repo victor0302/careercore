@@ -1860,3 +1860,45 @@ Separating them gives the user actionable guidance in each case.
 - Any refactor of the requirements selector must preserve `requirement_id` as the value,
   not `id`. This is documented in the component and in this ADR.
 - The entity type change resets `selectedEntityId` to prevent cross-type UUID reuse.
+
+---
+
+## ADR-057 — File upload uses native fetch; session-local state proxies missing list endpoint
+
+**Date:** 2026-04-27 (PR #142, issue #131)  
+**Status:** Accepted
+
+**Context:**  
+Two design constraints governed the Phase 1 file upload UI:
+
+1. The `api.ts` fetch wrapper unconditionally sets `Content-Type: application/json` and
+   calls `JSON.stringify(body)`. Passing a `FormData` object through it produces the
+   string `"[object FormData]"` as the request body with the wrong content type — the
+   backend rejects it with 422 Unprocessable Entity.
+
+2. `GET /api/v1/files` (list all uploaded files for the authenticated user) is not
+   implemented in Phase 1. A TanStack Query `useQuery` pointed at it would 404 on every
+   page load and leave the list permanently empty or in an error state.
+
+**Decision:**  
+- File uploads bypass `api.ts` and use native `fetch` directly with no `Content-Type`
+  header. The browser sets `multipart/form-data; boundary=…` automatically when the
+  request body is a `FormData` instance. The Bearer token is attached via `getAccessToken()`
+  from `@/lib/auth` the same way other authenticated requests work.
+- Previously uploaded files are tracked in component-local `useState<FileUploadResponse[]>`.
+  New uploads are prepended to the list. The list is ephemeral — it resets on page
+  refresh. A visible note in the UI tells users this and instructs them to refresh to see
+  extraction results.
+
+**Consequences:**  
+- Multipart uploads work correctly with the existing backend without any changes to
+  `api.ts`.
+- The file list is incomplete (session-only) but honest — no stale or falsely-empty
+  query state.
+- Any future upload endpoint (avatar, attachment) must also use native `fetch`, not
+  `api.post`. The pattern should be documented at the call site.
+- When `GET /api/v1/files` is implemented (Phase 2), `FileUploadSection` should replace
+  the local state with a `useQuery` call and remove the session-only caveat from the UI.
+- `api.ts` should not be changed to support multipart as a special case — keeping it
+  JSON-only maintains a clear contract: all structured API calls go through the wrapper,
+  binary uploads go through native `fetch`.

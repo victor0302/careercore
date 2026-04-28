@@ -227,3 +227,33 @@ What to remember next time:
 - the `uv` venv build fails on this repo with `setuptools.backends` not found;
   use the main worktree's `.venv/bin/pytest` with `PYTHONPATH` set to the
   target worktree's `backend/` directory
+
+### Issue #131 — File upload UI for resume PDF extraction
+
+What was done:
+- added `FileUploadResponse` interface to `frontend/src/types/index.ts`
+- added `FileUploadSection` component to `frontend/src/app/profile/page.tsx`
+  between `BasicInfoSection` and the tab panel
+- client-side validation on file select (MIME type + 10 MB), native `fetch`
+  for upload (not `api.post`), status-code-to-message mapping
+- session-local `useState<FileUploadResponse[]>` as Phase 1 workaround for
+  missing `GET /api/v1/files` backend endpoint
+- file input resets via incrementing `inputKey` state after successful upload
+- `tsc --noEmit` passes; opened PR #142
+
+What mattered:
+- `api.ts` always sets `Content-Type: application/json` — passing `FormData`
+  through it produces a broken request body; native `fetch` with no
+  `Content-Type` header is the correct pattern for multipart uploads
+- `GET /api/v1/files` does not exist in Phase 1; never attempt to call it
+- `FileUploadResponse.status` is always `"pending"` immediately after upload —
+  extraction is asynchronous; do not show "ready" based on the upload response
+- see ADR-057 for the formal decisions around both constraints
+
+What to remember next time:
+- any new binary/multipart upload must use native `fetch`, not `api.post`;
+  add a comment referencing ADR-057 at the call site
+- when Phase 2 adds `GET /api/v1/files`, replace `useState` list with a
+  `useQuery` and remove the session-only note from the UI
+- `key` prop increment is the cleanest way to reset a file input in React;
+  `ref.current.value = ""` works but does not trigger React's reconciliation
