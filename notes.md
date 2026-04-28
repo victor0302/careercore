@@ -4385,3 +4385,59 @@ timeout), the server will return 401. The `catch {}` block absorbs this silently
 `finally` block still clears local state. The refresh cookie in this scenario will expire
 on its own schedule — the server-side invalidation only succeeds when a valid access token
 is present.
+
+---
+
+## 14. Phase 1 security audit — findings (2026-04-28)
+
+A systematic security review of the full Phase 1 codebase was conducted after all six
+open items from the earlier Phase 1 audit (section 13) were closed. This audit focused on
+the attack surface rather than feature completeness: storage access controls, credential
+management, input validation on file handling, and HTTP security posture.
+
+### What is secure
+
+The auth stack is correct: bcrypt with 12 rounds for passwords, SHA-256 hash of the
+refresh token stored in the DB (never the raw token), httpOnly + SameSite=Lax cookie for
+the refresh token, access token in sessionStorage (not localStorage), 15-minute access
+token lifetime, DB-backed rotation that marks tokens as used, full server-side invalidation
+on logout (fixed in PR #134). JWT decodes validate the `type` claim to prevent access/refresh
+token confusion.
+
+Rate limiting is in place on auth endpoints (fixed-window, IP-keyed, 10 req / 15 min) and
+AI endpoints (sliding-window, user-keyed). File service enforces MIME allowlist and 10 MB
+size cap before touching storage. All entity ownership checks are enforced at the service
+layer; the cross-user IDOR suite (PR #114) covers nine entity types.
+
+The global exception handler scrubs stack traces in production. Docs endpoints
+(`/docs`, `/redoc`, `/openapi.json`) are disabled when `APP_ENV=production`.
+No `dangerouslySetInnerHTML` usage found in the frontend.
+
+### Open findings (tracked as GitHub issues)
+
+| Issue | Severity | Area | Finding |
+|-------|----------|------|---------|
+| #146 | Critical | infra | `storage_init` sets anonymous public-read policy on the MinIO bucket — presigned URL auth is bypassed entirely |
+| #147 | High | backend | Storage key extension derived from user-controlled filename — allows arbitrary suffix on stored object |
+| #148 | High | infra | PostgreSQL and MinIO service credentials are hardcoded in `docker-compose.yml` with no override mechanism |
+| #149 | Medium | backend | CORS configured with `allow_methods=["*"]` and `allow_headers=["*"]` — broader than the API requires |
+
+#146 and #147 are tightly coupled: the public bucket policy makes the user-controlled
+extension directly exploitable (an attacker can cause a `.php` object to be publicly
+accessible). They should be fixed in the same PR.
+
+### Informational (no issue filed)
+
+- Redis has no password (`--requirepass` not set). It is on the internal Docker network only
+  and no port is exposed to the host, so the blast radius is limited to containers on
+  `careercore-net`. Acceptable for Phase 1 local dev; add `REDIS_PASSWORD` before any
+  cloud deployment.
+- MinIO endpoint uses plain HTTP (`http://`) unconditionally. TLS termination is a Phase 2
+  infrastructure concern for any cloud deployment.
+- `POST /auth/register` returns HTTP 409 with "A user with this email already exists." —
+  email enumeration is possible. Acceptable UX tradeoff for Phase 1; revisit if user privacy
+  requirements tighten.
+
+### Recommended resolution order
+
+#146 + #147 together (one PR, bucket policy + key derivation fix) → #148 → #149.
