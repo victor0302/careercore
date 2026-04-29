@@ -237,3 +237,11 @@ export interface ResumeVersionDetailRead {
 export interface ApiError {
   detail: string;
 }
+
+// ── Files ─────────────────────────────────────────────────────────────────────
+
+export interface FileUploadResponse {
+  id: string;
+  status: string; // "pending" | "processing" | "ready" | "error"
+  filename: string;
+}

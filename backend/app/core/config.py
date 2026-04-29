@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     CELERY_RESULT_BACKEND: str
 
     # AI
-    AI_PROVIDER: Literal["anthropic", "mock"] = "mock"
+    AI_PROVIDER: Literal["anthropic", "mock", "openai_compatible", "ollama"] = "mock"
     ANTHROPIC_API_KEY: str = ""
     # Model names — override to pin a version or test a different model tier
     AI_HAIKU_MODEL: str = "claude-haiku-4-5-20251001"

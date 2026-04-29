@@ -198,3 +198,62 @@ What to remember next time:
   merge conflicts because each touched disjoint areas (frontend/app/jobs,
   infra/terraform, frontend/app/resumes, backend/app/ai) with the single
   exception of frontend/src/types/index.ts, which required a manual merge
+
+### Issue #127 — Log non-transient parse_job exceptions
+
+What was done:
+- added `logger = logging.getLogger(__name__)` to `job_tasks.py`
+- replaced `except Exception: pass` with `logger.error(..., exc_info=True)`;
+  function still returns normally (no re-raise, per ADR-046)
+- created `tests/unit/workers/test_parse_job_task.py` with three tests using
+  the `run.__func__` / `monkeypatch` / `SimpleNamespace` pattern from
+  `test_extraction_tasks.py`
+- ran tests via `PYTHONPATH=backend /home/vic/careercore/backend/.venv/bin/pytest` —
+  all 3 pass (uv build fails due to pre-existing `setuptools.backends` issue)
+- opened PR #135
+
+What mattered:
+- the fix is logging only — do not re-raise or retry non-transient exceptions;
+  ADR-046 requires job creation to succeed regardless of AI availability
+- `exc_info=True` is mandatory; without it you get the message but no traceback
+- `_TRANSIENT_EXCEPTIONS = (BotoCoreError, SQLAlchemyError)` must stay narrow;
+  AI-layer errors are not transient and must not be added here
+
+What to remember next time:
+- `run.__func__(task_instance, *args)` is the correct way to unit-test a
+  bound Celery task function without a real broker
+- `celery.exceptions.Retry` is what `self.retry(exc=exc)` raises — the fake
+  `self.retry` in tests must raise it, not return it
+- the `uv` venv build fails on this repo with `setuptools.backends` not found;
+  use the main worktree's `.venv/bin/pytest` with `PYTHONPATH` set to the
+  target worktree's `backend/` directory
+
+### Issue #131 — File upload UI for resume PDF extraction
+
+What was done:
+- added `FileUploadResponse` interface to `frontend/src/types/index.ts`
+- added `FileUploadSection` component to `frontend/src/app/profile/page.tsx`
+  between `BasicInfoSection` and the tab panel
+- client-side validation on file select (MIME type + 10 MB), native `fetch`
+  for upload (not `api.post`), status-code-to-message mapping
+- session-local `useState<FileUploadResponse[]>` as Phase 1 workaround for
+  missing `GET /api/v1/files` backend endpoint
+- file input resets via incrementing `inputKey` state after successful upload
+- `tsc --noEmit` passes; opened PR #142
+
+What mattered:
+- `api.ts` always sets `Content-Type: application/json` — passing `FormData`
+  through it produces a broken request body; native `fetch` with no
+  `Content-Type` header is the correct pattern for multipart uploads
+- `GET /api/v1/files` does not exist in Phase 1; never attempt to call it
+- `FileUploadResponse.status` is always `"pending"` immediately after upload —
+  extraction is asynchronous; do not show "ready" based on the upload response
+- see ADR-057 for the formal decisions around both constraints
+
+What to remember next time:
+- any new binary/multipart upload must use native `fetch`, not `api.post`;
+  add a comment referencing ADR-057 at the call site
+- when Phase 2 adds `GET /api/v1/files`, replace `useState` list with a
+  `useQuery` and remove the session-only note from the UI
+- `key` prop increment is the cleanest way to reset a file input in React;
+  `ref.current.value = ""` works but does not trigger React's reconciliation
