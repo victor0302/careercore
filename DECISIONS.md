@@ -1745,3 +1745,40 @@ can do so without changing the hook.
   responded and local state is cleared.
 - The ordering constraint — API call before `clearTokens()` — must be preserved. Calling
   `clearTokens()` first would remove the token needed to authenticate the server request.
+
+## ADR-059 — Compose variable interpolation with fallback defaults for service credentials
+
+**Date:** 2026-04-29 (PR #148, issue #148)  
+**Status:** Accepted
+
+**Context:**  
+`docker-compose.yml` hard-coded four service credentials as YAML literals:
+`POSTGRES_USER`, `POSTGRES_PASSWORD`, `MINIO_ROOT_USER`, and `MINIO_ROOT_PASSWORD`.
+The same literals appeared in the `storage_init` entrypoint. This meant:
+(a) every clone of the repository exposed working default credentials with no
+override mechanism, and (b) changing the MinIO server credentials without also
+updating the `mc alias set` command would break bucket initialization at startup.
+
+**Decision — Use `${VAR:-default}` interpolation; keep safe fallback defaults:**
+
+All four hardcoded credential sites were replaced with Docker Compose variable
+interpolation using the `${VAR:-default}` form. The fallback values (`careercore`
+and `minioadmin`) match the previous literals, so local development continues to
+work without requiring a `.env` file. Production deployments supply real values via
+their deployment environment (CI secrets, ECS task definitions, Kubernetes secrets),
+causing Compose to use those values instead of the fallbacks.
+
+The alternative — requiring the variables to be set with no default — was rejected
+because it would break zero-config local dev for new contributors. The alternative
+of retaining literals and documenting overrides in `.env.example` was rejected because
+Compose never reads `.env.example`; only a `.env` file or shell environment variables
+influence interpolation.
+
+**Consequences:**
+- Operators can override any of the four credentials by setting the corresponding
+  environment variable before running `docker compose up`. No compose file edits needed.
+- Local dev is unchanged: variables default to the previous literal values.
+- `.env.example` documents all four variables with an explicit production warning so
+  operators know to change them before any cloud deployment.
+- If `POSTGRES_USER` or `POSTGRES_PASSWORD` is changed, `DATABASE_URL` in `.env`
+  must be updated to match; the DSN is not dynamically constructed from parts.

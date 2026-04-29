@@ -4385,3 +4385,69 @@ timeout), the server will return 401. The `catch {}` block absorbs this silently
 `finally` block still clears local state. The refresh cookie in this scenario will expire
 on its own schedule — the server-side invalidation only succeeds when a valid access token
 is present.
+
+### 12.53 Issue #148 — Replace hardcoded service credentials with env-var interpolation (PR #148)
+
+Before this change, `docker-compose.yml` hard-coded four credentials directly as YAML
+literals: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `MINIO_ROOT_USER`, and
+`MINIO_ROOT_PASSWORD`. Anyone who cloned the repository got working default credentials
+with no indication they should ever be changed. The same literal strings also appeared in
+the `storage_init` entrypoint's `mc alias set` command, meaning the MinIO client would
+always authenticate with `minioadmin`/`minioadmin` regardless of what credentials the
+MinIO server was started with.
+
+What changed:
+
+All four credential sites in `docker-compose.yml` were updated to use Docker Compose
+variable interpolation with fallback defaults (`${VAR:-default}`):
+
+```yaml
+# db service
+POSTGRES_USER: ${POSTGRES_USER:-careercore}
+POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-careercore}
+
+# storage service
+MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+
+# storage_init entrypoint
+mc alias set local http://storage:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
+```
+
+`.env.example` received a new `Service credentials` section documenting all four variables
+with an explicit production warning comment. The defaults in the example file match the
+compose fallback defaults so local dev is unchanged out of the box.
+
+Why `${VAR:-default}` instead of requiring the variable to be set?
+
+Local development must continue to work without requiring a `.env` file. The `:-default`
+syntax instructs Compose to use the fallback when the variable is unset or empty, preserving
+zero-config startup for new contributors. Production deployments override the variables via
+their deployment environment (CI secrets, ECS task definitions, Kubernetes secrets), making
+the fallback irrelevant in those contexts.
+
+Why update `storage_init` separately from the `storage` service?
+
+`storage_init` runs `mc alias set` with explicit credentials to authenticate against the
+MinIO server. If the MinIO server is started with custom credentials but `storage_init`
+still uses hardcoded literals, bucket initialization would fail with a 403. Both sides of
+the connection must read from the same variables.
+
+Why document these in `.env.example`?
+
+`.env.example` is the authoritative reference for environment configuration. Adding the
+variables there (with a change-before-production comment) ensures operators looking for
+tunable knobs find them in the canonical place rather than needing to read the compose file.
+
+Real issues encountered:
+
+None. The change is purely mechanical: YAML literal → interpolation syntax. Compose
+interprets `${VAR:-default}` directly; no shell wrapper or extra quoting is needed.
+
+What future contributors should understand:
+
+The fallback defaults (`careercore` / `minioadmin`) are safe for local dev only. Any
+deployment that is reachable from the network must set strong values for all four variables.
+The `DATABASE_URL` in `.env.example` still embeds the default credentials in its DSN;
+if `POSTGRES_USER` or `POSTGRES_PASSWORD` is changed, `DATABASE_URL` must be updated to
+match or the backend will fail to connect.
