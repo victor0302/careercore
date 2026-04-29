@@ -76,7 +76,6 @@ services:
       /bin/sh -c "
         mc alias set local http://storage:9000 minioadmin minioadmin;
         mc mb --ignore-existing local/careercore-uploads;
-        mc anonymous set download local/careercore-uploads;
         echo 'Bucket initialized.';
       "
     restart: "no"

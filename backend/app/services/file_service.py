@@ -1,7 +1,6 @@
 """File service — upload, retrieve, and delete files via MinIO."""
 
 import uuid
-from pathlib import Path
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -20,6 +19,12 @@ ALLOWED_CONTENT_TYPES = {
     "text/plain",
 }
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+_MIME_TO_EXT = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "text/plain": ".txt",
+}
 
 
 def _get_s3_client() -> "boto3.client":  # type: ignore[name-defined]
@@ -73,7 +78,7 @@ class FileService:
             raise ValueError("File exceeds 10 MB limit.")
 
         file_id = uuid.uuid4()
-        suffix = Path(filename).suffix.lower()
+        suffix = _MIME_TO_EXT[content_type]
         storage_key = f"{user_id}/{file_id}{suffix}"
 
         try:

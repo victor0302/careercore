@@ -1745,3 +1745,52 @@ can do so without changing the hook.
   responded and local state is cleared.
 - The ordering constraint — API call before `clearTokens()` — must be preserved. Calling
   `clearTokens()` first would remove the token needed to authenticate the server request.
+
+## ADR-058 — MinIO bucket: no anonymous policy; storage key extension derived from MIME type
+
+**Date:** 2026-04-29 (PR #148, issues #146 + #147)  
+**Status:** Accepted
+
+**Context:**  
+The `storage_init` service in `docker-compose.yml` applied an anonymous read policy to the entire
+`careercore-uploads` bucket, making all stored objects world-readable. Separately, `FileService.upload()`
+derived the storage key suffix from the user-supplied filename rather than the already-validated MIME
+type. Combined, these created a path where an attacker could upload a file with a crafted extension
+(e.g., `resume.pdf.php`) and retrieve the object via a direct URL with a `.php` suffix — bypassing
+the presigned URL system entirely. Two design questions arose: (1) how to eliminate the public bucket
+access without breaking the download flow, and (2) where to derive the storage key extension from.
+
+**Decision 1 — Remove anonymous bucket policy; presigned URLs are the only download path:**
+
+The `mc anonymous set download local/careercore-uploads` line was removed from the `storage_init`
+entrypoint. Presigned URLs already provide authenticated, time-limited download access for all
+legitimate clients. There is no use case for anonymous direct object access — the presigned URL
+mechanism covers every downstream consumer (frontend download links, Celery text extraction). Making
+the bucket private by default is zero cost and eliminates the direct-access risk entirely.
+
+**Decision 2 — Derive storage key extension from `content_type`, not `filename`:**
+
+`content_type` is validated against `ALLOWED_CONTENT_TYPES` before any storage key is constructed;
+it is server-controlled. `filename` is user-supplied and must be treated as untrusted input. A
+`_MIME_TO_EXT` mapping was introduced to translate the validated MIME type to a canonical extension.
+The alternative — validating the filename extension against an allowlist — would require keeping two
+allowlists in sync and still permits attackers to observe which filenames the server accepts. Using
+`content_type` as the sole source collapses that attack surface: the extension on disk is always
+determined by the server, never the client.
+
+**Decision 3 — `original_filename` is unchanged:**
+
+The `original_filename` column on `UploadedFile` is display-only (shown in the UI as the user's
+original name). It is not used in any storage or access-control path. Preserving it unchanged
+maintains the user-visible label without creating any security risk, since the actual storage key
+is what matters for access.
+
+**Consequences:**
+- Direct object URL access to `careercore-uploads` is no longer possible. Any tooling or test that
+  assumed direct-URL access must use presigned URLs instead.
+- Storage keys always carry a MIME-derived extension (`.pdf`, `.docx`, `.txt`). Existing objects
+  uploaded before this change retain their original (potentially user-influenced) keys; only new
+  uploads are affected.
+- Adding a new allowed MIME type requires a corresponding entry in `_MIME_TO_EXT`; omitting it
+  causes a `KeyError` at upload time, which is an intentional fail-fast behavior.
+- `from pathlib import Path` was removed from `file_service.py` as it became unused.
