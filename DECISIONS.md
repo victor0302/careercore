@@ -1748,6 +1748,101 @@ can do so without changing the hook.
 
 ---
 
+## ADR-054 — Phase 1 security audit: four findings, severity classifications, and fix strategy
+
+**Date:** 2026-04-28  
+**Status:** Accepted
+
+**Context:**  
+After all six Phase 1 audit items (issues #127–#132) were resolved and merged, a dedicated
+security pass was conducted covering: object storage access controls, credential hygiene,
+file upload input validation, HTTP middleware configuration, auth token handling, and
+injection surface. The audit used the threat model of an external attacker with read access
+to the public repo and a registered account on the running application.
+
+**Findings and decisions:**
+
+**Finding 1 — MinIO bucket has anonymous public-read policy (Critical, issue #146)**
+
+The `storage_init` container runs `mc anonymous set download local/careercore-uploads`,
+which grants unauthenticated HTTP GET access to every object in the bucket. The backend
+already generates presigned URLs with a configurable TTL for all file downloads; the
+anonymous policy makes that mechanism meaningless because the objects are directly
+accessible to anyone who can construct or guess the storage key pattern
+(`{user_id}/{file_id}.{ext}`).
+
+Decision: Remove the `mc anonymous set download` line. The presigned URL system is the
+correct access control; no anonymous bucket policy is needed or wanted. This is a pure
+removal — no application code changes required.
+
+**Finding 2 — Storage key extension derived from user-controlled filename (High, issue #147)**
+
+`FileService.upload` calls `Path(filename).suffix.lower()` where `filename` is the
+user-supplied upload name, then constructs the storage key as `{user_id}/{file_id}{suffix}`.
+An attacker who uploads a file named `resume.pdf.php` causes the object in MinIO to carry a
+`.php` suffix. Combined with finding 1 (public bucket), this allows serving an
+arbitrary-extension object from public storage. With the bucket locked, it is still an
+incorrect design — the key should not be influenced by user input.
+
+Decision: Derive the storage key extension from the validated `content_type`, not the
+filename. A `_MIME_TO_EXT` dict maps each allowed MIME type to its canonical extension.
+`original_filename` is still stored on the `UploadedFile` record unchanged for display
+purposes; only the storage key derivation changes.
+
+Why not strip or sanitize the filename instead? Sanitization is a fragile mitigation
+against a structural problem. If the extension comes from a validated, server-controlled
+mapping there is no user input to sanitize. The fix is simpler and more obviously correct.
+
+**Finding 3 — Hardcoded service credentials in docker-compose.yml (High, issue #148)**
+
+PostgreSQL password (`careercore`) and MinIO root credentials (`minioadmin`/`minioadmin`)
+are baked into `docker-compose.yml` with no override mechanism. Cloning the repo gives a
+fully functional credential set. The `.env.example` documents `MINIO_ACCESS_KEY` and
+`MINIO_SECRET_KEY` for the application layer, but the compose-level service credentials
+are separate and never sourced from environment.
+
+Decision: Replace hardcoded values with compose variable interpolation
+(`${POSTGRES_PASSWORD:-careercore}`, etc.) so they can be overridden in any environment
+that sources a `.env` file. The `:-default` syntax preserves the current behavior for
+local development (no `.env` change required). Document all four variables in `.env.example`
+with a prominent "CHANGE FOR PRODUCTION" comment.
+
+Why keep defaults at all? Breaking local development to force credential changes is an
+unreasonable burden during Phase 1. The defaults remain; they are now clearly documented
+as insecure defaults rather than silent values.
+
+**Finding 4 — CORS allows wildcard methods and headers (Medium, issue #149)**
+
+`allow_methods=["*"]` and `allow_headers=["*"]` in `main.py`. Origin allowlisting is
+correct, but the wildcard method and header sets grant any allowed origin permission to
+use any HTTP method and send any header. This is broader than the API requires.
+
+Decision: Replace with explicit lists. Methods: `["GET", "POST", "PATCH", "DELETE",
+"OPTIONS"]`. Headers: `["Content-Type", "Authorization"]`. These are the only methods the
+API exposes and the only headers the frontend sends. This is a strict tightening that
+cannot break any existing client; if a method or header is needed in future it is added
+explicitly.
+
+**Why record these as an ADR and not just as issue descriptions?**  
+The issue descriptions record what to fix. This ADR records why each fix was chosen over
+alternatives and documents the reasoning that should survive PR review. It also establishes
+that a security audit was conducted and what its scope was, which is relevant for the
+capstone submission.
+
+**Consequences:**
+- Issues #146 and #147 should be fixed in a single PR because they compound each other:
+  the public bucket makes the bad extension directly exploitable. Fixing only one leaves
+  residual risk.
+- Issues #148 and #149 are independent and can be fixed in separate PRs.
+- After #146 is merged, presigned URLs become the only file access path. Tests that
+  bypass presigned URLs by hitting the bucket directly (if any exist) will break — this
+  is intentional.
+- The Redis password-less configuration and plain-HTTP MinIO endpoint are not tracked as
+  issues because they are acceptable risks within a local Docker-only Phase 1 deployment.
+  Both must be addressed before any cloud deployment.
+
+---
+
 ## ADR-055 — Nav component: null-render auth guard, startsWith active detection, inline-SVG hamburger
 
 **Date:** 2026-04-27 (PR #137, issue #129)  
