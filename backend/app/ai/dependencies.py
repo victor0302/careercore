@@ -29,8 +29,17 @@ def get_ai_provider() -> AIProvider:
 
         return AnthropicProvider()  # type: ignore[return-value]
 
+    if provider_name == "openai_compatible":
+        from app.ai.providers.openai_compatible_provider import OpenAICompatibleProvider
+
+        return OpenAICompatibleProvider()  # type: ignore[return-value]
+
+    if provider_name == "ollama":
+        from app.ai.providers.ollama_provider import OllamaProvider
+
+        return OllamaProvider()  # type: ignore[return-value]
+
     raise ValueError(
         f"Unknown AI_PROVIDER={provider_name!r}. "
-        "Valid options: 'mock', 'anthropic'. "
-        "(Phase 2 adds 'openai_compatible'; Phase 3 adds 'ollama'.)"
+        "Valid options: 'mock', 'anthropic', 'openai_compatible', 'ollama'."
     )
