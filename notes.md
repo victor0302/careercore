@@ -4724,6 +4724,52 @@ What future contributors should understand:
   with a real query.
 ---
 
+### 12.54 Issue #149 — Restrict CORS to explicit methods and headers (PR #149)
+
+Before this change, `CORSMiddleware` in `backend/app/main.py` allowed any HTTP method and
+any request header from every configured origin:
+
+```python
+allow_methods=["*"],
+allow_headers=["*"],
+```
+
+`allow_origins` was already restricted to a configured allowlist, so the origin guard was
+correct. However, wildcarding methods and headers is broader than the API requires and
+violates the principle of least privilege: any allowed origin could send `PUT`, `DELETE`,
+`CONNECT`, or custom headers that the API never uses.
+
+What changed:
+
+Only `backend/app/main.py` was modified. The two wildcard values were replaced with
+explicit lists:
+
+```python
+allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+allow_headers=["Content-Type", "Authorization"],
+```
+
+**Methods:** `GET` (reads), `POST` (creates, auth, AI calls), `PATCH` (updates), `DELETE`
+(removals), and `OPTIONS` (preflight). `PUT` is not used by any endpoint. `OPTIONS` must
+be listed explicitly so Starlette handles CORS preflight responses correctly.
+
+**Headers:** `Content-Type` (JSON body, multipart uploads) and `Authorization` (Bearer
+token). No other custom headers are sent by the Next.js frontend.
+
+Why no other CORS changes?
+
+Origins are already correct. `allow_credentials=True` is required for the httpOnly refresh
+token cookie set by `POST /api/v1/auth/login`. No other CORS fields needed adjustment.
+
+What future contributors should understand:
+
+If a new endpoint is added that accepts a custom header (e.g., `X-Idempotency-Key`), that
+header must be added to `allow_headers` here, or browsers will block the preflight. The
+narrow allowlist is intentional — it is the forcing function that makes CORS policy
+reviews part of the normal endpoint-addition workflow.
+
+---
+
 ## 14. Phase 1 security audit — findings (2026-04-28)
 
 A systematic security review of the full Phase 1 codebase was conducted after all six
