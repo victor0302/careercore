@@ -4791,6 +4791,52 @@ match or the backend will fail to connect.
 
 ---
 
+### 12.54 Issue #149 — Restrict CORS to explicit methods and headers (PR #149)
+
+Before this change, `CORSMiddleware` in `backend/app/main.py` allowed any HTTP method and
+any request header from every configured origin:
+
+```python
+allow_methods=["*"],
+allow_headers=["*"],
+```
+
+`allow_origins` was already restricted to a configured allowlist, so the origin guard was
+correct. However, wildcarding methods and headers is broader than the API requires and
+violates the principle of least privilege: any allowed origin could send `PUT`, `DELETE`,
+`CONNECT`, or custom headers that the API never uses.
+
+What changed:
+
+Only `backend/app/main.py` was modified. The two wildcard values were replaced with
+explicit lists:
+
+```python
+allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+allow_headers=["Content-Type", "Authorization"],
+```
+
+**Methods:** `GET` (reads), `POST` (creates, auth, AI calls), `PATCH` (updates), `DELETE`
+(removals), and `OPTIONS` (preflight). `PUT` is not used by any endpoint. `OPTIONS` must
+be listed explicitly so Starlette handles CORS preflight responses correctly.
+
+**Headers:** `Content-Type` (JSON body, multipart uploads) and `Authorization` (Bearer
+token). No other custom headers are sent by the Next.js frontend.
+
+Why no other CORS changes?
+
+Origins are already correct. `allow_credentials=True` is required for the httpOnly refresh
+token cookie set by `POST /api/v1/auth/login`. No other CORS fields needed adjustment.
+
+What future contributors should understand:
+
+If a new endpoint is added that accepts a custom header (e.g., `X-Idempotency-Key`), that
+header must be added to `allow_headers` here, or browsers will block the preflight. The
+narrow allowlist is intentional — it is the forcing function that makes CORS policy
+reviews part of the normal endpoint-addition workflow.
+
+---
+
 ## 14. Phase 1 security audit — findings (2026-04-28)
 
 A systematic security review of the full Phase 1 codebase was conducted after all six
@@ -4844,3 +4890,67 @@ accessible). They should be fixed in the same PR.
 ### Recommended resolution order
 
 #146 + #147 together (one PR, bucket policy + key derivation fix) → #148 → #149.
+
+### 12.52 Issues #146 + #147 — Remove public bucket policy and derive storage key extension from MIME type (PR #148)
+
+Two compounding security issues were fixed together in a single PR because the public bucket
+made the user-controlled extension directly exploitable as a path to serving arbitrary-extension
+objects to anyone on the internet.
+
+**Issue #146 — Public read policy on MinIO bucket**
+
+`docker-compose.yml`'s `storage_init` service ran `mc anonymous set download local/careercore-uploads`
+as part of bucket initialization. This applied an anonymous read policy to the entire bucket, making
+every stored object world-readable to anyone who knew its storage key — completely bypassing the
+presigned URL system that exists specifically to enforce per-request authenticated access.
+
+The fix was surgical: remove that single `mc anonymous set download` line. The bucket now has no
+anonymous access policy. Presigned URLs remain the sole authorized download path and are unchanged.
+
+**Issue #147 — Storage key extension derived from user-controlled filename**
+
+`FileService.upload()` derived the object's storage key suffix from the uploaded filename:
+
+```python
+suffix = Path(filename).suffix.lower()
+storage_key = f"{user_id}/{file_id}{suffix}"
+```
+
+An attacker could upload a file named `resume.pdf.php`; `Path(...).suffix` returns `.php` and
+the object would be stored under a `.php` key. With the public bucket policy in place, any caller
+who constructed the key could retrieve an object with a `.php` extension — a useful primitive for
+content-type confusion attacks.
+
+The fix adds a `_MIME_TO_EXT` mapping keyed on the already-validated `content_type`:
+
+```python
+_MIME_TO_EXT = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "text/plain": ".txt",
+}
+```
+
+`suffix = Path(filename).suffix.lower()` was replaced with `suffix = _MIME_TO_EXT[content_type]`.
+Because `content_type` is validated against `ALLOWED_CONTENT_TYPES` before reaching the suffix
+derivation, a missing key is impossible in practice (a 400 would have been raised earlier). The
+`original_filename` field on the `UploadedFile` record is display-only and is stored unchanged.
+
+The unused `from pathlib import Path` import was removed as a consequence.
+
+**Why fix both in the same PR?**
+
+The issues compound: the public policy turns the extension manipulation into an immediate exploit,
+and the extension manipulation is the reason the public policy is so dangerous. Fixing one while
+leaving the other would leave a meaningful residual risk. Pairing them in a single PR also keeps
+the security narrative coherent for reviewers.
+
+Real issues encountered:
+
+None — both changes were minimal and localized. All existing upload/download tests passed unchanged.
+
+What future contributors should understand:
+
+The `_MIME_TO_EXT` mapping is the authoritative source of allowed extensions. If a new MIME type is
+added to `ALLOWED_CONTENT_TYPES`, a corresponding entry must be added to `_MIME_TO_EXT`, otherwise
+`FileService.upload()` will raise a `KeyError` at runtime for that content type.
