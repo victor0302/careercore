@@ -1745,3 +1745,40 @@ can do so without changing the hook.
   responded and local state is cleared.
 - The ordering constraint — API call before `clearTokens()` — must be preserved. Calling
   `clearTokens()` first would remove the token needed to authenticate the server request.
+
+## ADR-060 — CORS restricted to explicit methods and headers
+
+**Date:** 2026-04-29 (PR #149, issue #149)  
+**Status:** Accepted
+
+**Context:**  
+`CORSMiddleware` in `backend/app/main.py` used wildcard values for `allow_methods` and
+`allow_headers`. Origins were already restricted to a configured allowlist, but the
+wildcards allowed any HTTP verb and any request header from those origins — broader than
+the API actually requires.
+
+**Decision:**  
+Replace the wildcards with explicit lists:
+
+```python
+allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+allow_headers=["Content-Type", "Authorization"],
+```
+
+The method set covers every verb used by existing endpoints: `GET` for reads, `POST` for
+creates and auth, `PATCH` for updates, `DELETE` for removals, and `OPTIONS` for CORS
+preflight. `PUT` is unused. The header set covers the two headers the Next.js frontend
+sends: `Content-Type` for JSON/multipart bodies and `Authorization` for the Bearer token.
+`allow_credentials=True` and `allow_origins` are unchanged.
+
+**Alternatives considered:**  
+Keep wildcards. Rejected: violates least-privilege; any allowed origin could trigger
+unintended verbs or pass arbitrary headers the server is not prepared to handle.
+
+**Consequences:**  
+- CORS preflight responses now enumerate only the permitted methods and headers, reducing
+  the attack surface visible to browsers.
+- Adding a new endpoint that requires an additional custom header requires a corresponding
+  update to `allow_headers` — a deliberate forcing function for CORS review.
+- Existing integration tests are unaffected; all current frontend requests use methods and
+  headers within the new explicit lists.
