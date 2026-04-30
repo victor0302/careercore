@@ -4441,3 +4441,161 @@ accessible). They should be fixed in the same PR.
 ### Recommended resolution order
 
 #146 + #147 together (one PR, bucket policy + key derivation fix) → #148 → #149.
+
+---
+
+## 15. Phase 1 comprehensive audit — health, security, and new tickets (2026-04-29)
+
+A two-track audit was run simultaneously: a security-focused pass covering all attack
+surfaces, and a health check covering code correctness, schema consistency, and operational
+gaps. Both agents read the full codebase independently. This section records what was found
+and why each item was filed as a ticket.
+
+### Critical discovery: issues #146–149 are not yet implemented
+
+The first and most important finding was that the four security issues filed on 2026-04-28
+(#146 anonymous bucket, #147 user-supplied extension, #148 hardcoded credentials, #149 CORS
+wildcards) had not been applied to the codebase. The code still contained all four
+vulnerabilities. The agent prompts generated to fix these issues had not yet been run.
+This was confirmed by reading `docker-compose.yml`, `file_service.py`, and `main.py`
+directly and by inspecting `git log main`.
+
+Consequence: #146–149 remain open and must be completed before any of the new tickets are
+addressed. The severity classifications and recommended ordering from section 14 still apply.
+
+### Security audit findings (new issues)
+
+**#154 — IDOR on `requirement_ids` in generate_bullets (High)**
+
+`resume_service._get_job_requirements` fetches `JobRequirement` rows by primary key with
+no ownership check. A user can supply requirement IDs from another user's private job
+description; the requirement text is then injected verbatim into the Anthropic prompt
+context for their own bullet generation. This is a cross-user data exfiltration via AI
+prompt. The fix is a join through `JobDescription` filtered by `user_id`.
+
+**#158 — Rate limit keys on direct TCP IP, broken behind proxy (Medium)**
+
+`rate_limit.py` uses `request.client.host` as the rate limit key. Behind any reverse proxy
+or Docker load balancer, all traffic originates from the same proxy IP, collapsing all
+users into one shared bucket. The fix is `ProxyHeadersMiddleware` with a trusted proxy
+list so `request.client.host` is correctly populated from `X-Forwarded-For`.
+
+**#159 — Prompt injection via unsanitized user data (Medium)**
+
+`anthropic_provider.py` interpolates user-supplied strings (employer name, role title,
+job description raw text) directly into AI prompts with no delimiters. An attacker who
+stores prompt injection payloads in their profile or submits a malicious job description
+can influence model behavior. The fix is XML tag delimiters around all user-controlled
+content with explicit system prompt instructions to treat them as untrusted.
+
+**#160 — MinIO communication uses HTTP — plaintext transport (Medium)**
+
+All backend-to-MinIO traffic uses `http://`, including credential exchange and file
+transfers. The fix is TLS on MinIO with a configurable `MINIO_USE_SSL` setting.
+Previously noted as informational in section 14 ("acceptable for Phase 1 local dev");
+reclassified as a filed issue because the Terraform modules show this app is intended for
+AWS deployment where the attack surface is larger.
+
+**#161 — Terraform: RDS no encryption, no backups, no deletion protection (Medium)**
+
+The RDS Terraform module omits `storage_encrypted`, sets `backup_retention_period` to the
+default of 0 (no backups), sets `skip_final_snapshot = true`, and leaves
+`deletion_protection = false`. All user data at rest is unencrypted and the database can
+be accidentally destroyed with no recovery path.
+
+**#162 — Terraform: S3 bucket no server-side encryption, no public access block (Medium)**
+
+The storage Terraform module provisions versioning but omits
+`aws_s3_bucket_server_side_encryption_configuration` and
+`aws_s3_bucket_public_access_block`. User-uploaded files are unencrypted at rest and the
+bucket lacks an explicit public-access block resource, relying solely on the bucket policy
+for access control.
+
+**#163 — Terraform: DB password in plaintext ECS environment variable (High)**
+
+The compute module passes `DATABASE_URL` (containing the database password) as a plain
+`environment` entry in the ECS task definition. Despite `var.db_password` being marked
+`sensitive`, the rendered `container_definitions` JSON is not, so the password appears in
+the Terraform state file and in the AWS ECS console task definition view. Any principal
+with `ecs:DescribeTaskDefinition` can read it. Fix is Secrets Manager with a `secrets`
+reference in the container definition.
+
+### Health check findings (new issues)
+
+**#155 — Docker healthcheck wrong URL (High)**
+
+`docker-compose.yml` healthchecks the backend at `http://localhost:8000/health`, but the
+endpoint is mounted at `/api/v1/health`. The 404 response means the backend container
+never transitions to healthy. The fix is changing the path to `/api/v1/health`.
+
+**#156 — `completeness_pct` display bug: 0–1% instead of 0–100% (High)**
+
+`profile_service.py` computes `completeness_pct` as a float in [0.0, 1.0]. The profile
+page renders `Math.round(profile.completeness_pct)%`, so a fully complete profile shows
+as "1% complete". Fix: multiply by 100 before rounding in the frontend.
+
+**#157 — `generate_bullets` hardcodes `model="mock"` in AI call log (High)**
+
+`resume_service.py` logs `model="mock"` unconditionally regardless of which AI provider
+is active. In production with `AI_PROVIDER=anthropic`, every bullet generation cost record
+is attributed to the mock model and priced at the wrong rate. Fix: use `usage.model` from
+the `TokenUsage` returned by the AI call.
+
+**#164 — `parse_job` task leaves `JobDescription` in ambiguous failure state (Medium)**
+
+When retries are exhausted, `job_tasks.py` logs the error and returns `None`. The
+`JobDescription` stays with `parsed_at=None`, which is indistinguishable from "never
+queued." Users see "Not yet analyzed" indefinitely. Fix: add a `parse_status` field
+(`pending | processing | done | failed`) with a new migration and surface the error state
+in the UI.
+
+**#165 — Unbounded free-text fields enable resource exhaustion (Medium)**
+
+`raw_text` (job description), `description_raw`, and `summary_notes` have no `max_length`
+constraints. A multi-MB `raw_text` is forwarded verbatim to the AI provider, consuming
+token budget and potentially hitting provider payload limits. `requirement_ids` has no
+item count cap. Fix: add `max_length` and `max_items` constraints at the Pydantic schema
+layer.
+
+**#166 — Frontend `User` type declares fields `UserRead` never returns (Medium)**
+
+`types/index.ts` declares `is_active: boolean` and `tier: UserTier` on the `User`
+interface, but `UserRead` only returns `id` and `email`. At runtime these fields are
+always `undefined`. TypeScript believes they exist, making any code that branches on them
+silently wrong. Fix: align the schema by either adding the fields to `UserRead` or
+removing them from the interface.
+
+**#167 — Duplicate `TokenUsage` class in `ai/schemas.py` (Low)**
+
+`TokenUsage` is defined twice in the same file. Python silently uses the second definition.
+The first is dead code that will silently diverge if edited. Fix: remove the first
+definition.
+
+### Summary of new tickets
+
+| Issue | Severity | Area | Finding |
+|-------|----------|------|---------|
+| #154 | High | security | IDOR on `requirement_ids` — cross-user job data leaks into AI prompt |
+| #155 | High | infra | Docker healthcheck hits wrong URL — backend always unhealthy |
+| #156 | High | frontend | `completeness_pct` displays as 0–1% instead of 0–100% |
+| #157 | High | backend | `generate_bullets` hardcodes `model="mock"` in cost log |
+| #158 | Medium | security | Rate limit IP broken behind proxy — audit logs record wrong IP |
+| #159 | Medium | security | Prompt injection via unsanitized user data in AI prompts |
+| #160 | Medium | security | MinIO uses HTTP — credentials and files in plaintext |
+| #161 | Medium | infra | Terraform: RDS no encryption, no backups, no deletion protection |
+| #162 | Medium | infra | Terraform: S3 no server-side encryption, no public access block |
+| #163 | High | infra | Terraform: DB password in plaintext ECS environment variable |
+| #164 | Medium | backend | `parse_job` task leaves `JobDescription` in ambiguous failure state |
+| #165 | Medium | backend | Unbounded text fields allow resource exhaustion via AI token budget |
+| #166 | Medium | frontend | Frontend `User` type has fields `UserRead` never returns |
+| #167 | Low | backend | Duplicate `TokenUsage` class — dead code maintenance hazard |
+
+### Recommended resolution order
+
+Complete #146–149 first (already have implementation prompts). Then:
+
+#154 (IDOR — security, high impact) → #155 (healthcheck — breaks deployment) →
+#156 + #157 (visible correctness bugs) → #163 (Terraform creds) →
+#161 + #162 (Terraform encryption, can be one PR) →
+#158 + #159 + #160 (security hardening, independent) →
+#164 + #165 + #166 (correctness/quality) → #167 (cleanup).
