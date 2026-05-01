@@ -4385,3 +4385,63 @@ timeout), the server will return 401. The `catch {}` block absorbs this silently
 `finally` block still clears local state. The refresh cookie in this scenario will expire
 on its own schedule — the server-side invalidation only succeeds when a valid access token
 is present.
+
+### 12.49 Issues #155 + #156 — Fix backend healthcheck URL and completeness_pct display
+
+Two one-line bugs discovered and fixed in this session.
+
+**Issue #155 — Docker healthcheck hits /health instead of /api/v1/health**
+
+`docker-compose.yml` line 111 ran the backend healthcheck against:
+
+```
+http://localhost:8000/health
+```
+
+The FastAPI health router is mounted at the `/api/v1` prefix in `main.py`, so the
+registered path is `/api/v1/health`, not `/health`. The bare `/health` path returns
+404, which means `curl -f` exits non-zero on every probe. Docker marks the backend
+container as unhealthy after the retry window, and any container with
+`condition: service_healthy` on the backend (none currently, but this blocks future
+dependencies) would never start.
+
+Fix: changed line 111 to:
+
+```yaml
+test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+```
+
+No other healthchecks were touched — MinIO (`/minio/health/live`), db (`pg_isready`),
+redis (`redis-cli ping`), worker (Celery inspect ping), and frontend (wget) are all
+on correct paths.
+
+**Issue #156 — completeness_pct renders as 0–1% instead of 0–100%**
+
+`profile/page.tsx` line 111 rendered:
+
+```tsx
+{Math.round(profile.completeness_pct)}% complete
+```
+
+`profile_service.py` computes `completeness_pct` as a Python float in the range
+`[0.0, 1.0]`. Passing that value directly to `Math.round()` without scaling means a
+fully complete profile (value = `1.0`) displays as "1% complete" instead of "100% complete".
+
+Fix: multiplied by 100 before rounding:
+
+```tsx
+{Math.round(profile.completeness_pct * 100)}% complete
+```
+
+This is consistent with how percentage progress values are typically surfaced from REST
+APIs: the backend stores a normalized float, the frontend is responsible for converting
+it to a human-readable percentage.
+
+Real issues encountered:
+
+`python -m pytest` is not on the system PATH; the project venv at
+`backend/.venv/bin/pytest` is the correct entrypoint. Four pre-existing test files
+fail due to SQLite/JSONB incompatibility and an alembic version import path issue —
+both unrelated to these changes. The remaining 152 unit tests pass.
+
+TypeScript type check (`npx tsc --noEmit`) completed clean after `npm ci`.

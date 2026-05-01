@@ -1745,3 +1745,54 @@ can do so without changing the hook.
   responded and local state is cleared.
 - The ordering constraint — API call before `clearTokens()` — must be preserved. Calling
   `clearTokens()` first would remove the token needed to authenticate the server request.
+
+## ADR-057 — Healthcheck URL must include API version prefix; completeness_pct is a normalized float
+
+**Date:** 2026-05-01 (issues #155, #156)  
+**Status:** Accepted
+
+**Context:**  
+Two one-line bugs were introduced during earlier development:
+
+1. The docker-compose backend healthcheck probed `/health` rather than `/api/v1/health`.
+   All FastAPI routes are registered under the `/api/v1` prefix via the router mount in
+   `main.py`. The bare `/health` path is not registered and returns 404 unconditionally,
+   so `curl -f` always exits non-zero and the container never reaches a healthy state.
+
+2. The profile page rendered `Math.round(profile.completeness_pct)` without scaling.
+   `profile_service.py` stores and returns `completeness_pct` as a normalized float in
+   `[0.0, 1.0]`. Without multiplying by 100 the rendered value is always in the range
+   0–1, making a fully complete profile appear as "1% complete".
+
+**Decision 1 — Healthcheck URL includes full path with version prefix:**
+
+The correct test command is:
+
+```yaml
+test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+```
+
+The alternative of registering a `/health` alias in `main.py` was rejected: it would
+add a parallel, unversioned endpoint that bypasses the router structure, complicates
+future middleware changes, and obscures the fact that all application routes live under
+`/api/v1`. Fixing the healthcheck URL is the minimal, correct change.
+
+**Decision 2 — Frontend multiplies completeness_pct by 100:**
+
+The backend API contract returns a normalized float (`0.0`–`1.0`). Converting to a
+human-readable percentage is a presentation concern and belongs in the frontend:
+
+```tsx
+{Math.round(profile.completeness_pct * 100)}% complete
+```
+
+The alternative of changing the backend to return a 0–100 integer was rejected: the
+normalized float is the conventional representation for fractional values in REST APIs,
+and changing it would be a breaking contract change requiring a migration and version bump.
+
+**Consequences:**
+- The backend container now transitions to healthy correctly, unblocking any future
+  `condition: service_healthy` dependencies on it.
+- Profile completeness displays the correct 0–100% range to users.
+- The backend API contract (`completeness_pct` as a `[0.0, 1.0]` float) is unchanged.
+  Any future frontend consumer of this field must apply the same `× 100` scaling.

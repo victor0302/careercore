@@ -108,7 +108,7 @@ function BasicInfoSection() {
         <h2 className="text-lg font-semibold">Basic Information</h2>
         {profile && (
           <span className="rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
-            {Math.round(profile.completeness_pct)}% complete
+            {Math.round(profile.completeness_pct * 100)}% complete
           </span>
         )}
       </div>
