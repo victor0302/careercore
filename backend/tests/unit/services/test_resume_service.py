@@ -287,7 +287,7 @@ async def test_generate_bullets_discards_invalid_evidence_and_logs_usage(
     assert len(cost_service.logged_calls) == 1
     assert cost_service.logged_calls[0]["user_id"] == user.id
     assert cost_service.logged_calls[0]["call_type"] == AICallType.generate_bullets
-    assert cost_service.logged_calls[0]["model"] == "mock"
+    assert cost_service.logged_calls[0]["model"] == "test-bullets-model"
     assert cost_service.logged_calls[0]["prompt_tokens"] == 120
     assert cost_service.logged_calls[0]["completion_tokens"] == 80
     assert cost_service.logged_calls[0]["latency_ms"] >= 0

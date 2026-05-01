@@ -2248,3 +2248,53 @@ affect every user on every interaction. High severity despite having simple fixe
 - The health bugs (#155, #156, #157) are quick wins that can be batched into one PR.
 - The resolution order documented in notes.md section 15 is the recommended sequence.
 
+---
+
+## ADR-062 — Ownership join in `_get_job_requirements`; `usage.model` for cost log
+
+**Date:** 2026-05-01 (PR #155, issues #154 + #157)  
+**Status:** Accepted
+
+**Context:**  
+`ResumeService.generate_bullets` called `_get_job_requirements(requirement_ids)` with no ownership
+check, allowing any authenticated user to supply requirement IDs from another user's private job
+description — an IDOR. Separately, `cost_service.log_call` hardcoded `model="mock"` rather than
+reading the model name from the `TokenUsage` object returned by the AI provider, causing all
+cost records in production to be attributed to the wrong model. Two design decisions arose:
+(1) how to enforce ownership on requirement fetches without adding a new error path, and (2)
+where to source the model name.
+
+**Decision 1 — Join through `JobDescription` to enforce ownership; silent filter on mismatch:**
+
+`JobRequirement` rows do not carry a `user_id` directly; ownership flows through `JobDescription`.
+The fix adds a `.join(JobDescription, JobDescription.id == JobRequirement.job_id)` and filters on
+`JobDescription.user_id == user_id`. Requirements that do not belong to the requesting user are
+simply not returned — the method returns a shorter list rather than raising. The alternative —
+raising `PermissionError` when any requirement ID is foreign — would require a separate count
+query to distinguish "not found" from "not yours," adding complexity. The silent-filter approach
+is safe because `generate_bullets` already handles an empty requirements list (it produces no
+bullets, which is the correct outcome when the caller supplies invalid IDs). Callers cannot
+distinguish their own missing IDs from cross-user IDs, which is the desired behavior.
+
+**Decision 2 — Source model name from `usage.model`, not a string literal:**
+
+The `TokenUsage` object returned by `self._ai.generate_bullets(contexts)` carries the model name
+set by whichever AI provider is active. Using `usage.model` ensures that cost records always
+reflect the actual provider and model, and that the cost log stays correct as providers change
+or the model is upgraded. Hardcoding `"mock"` was a development artifact — the mock provider
+sets its own model name on `TokenUsage`, so `usage.model` works correctly in tests as well.
+
+**Decision 3 — Update the test assertion, not the production constant:**
+
+The existing test `test_generate_bullets_discards_invalid_evidence_and_logs_usage` asserted
+`model == "mock"`, which validated the bug rather than the contract. The assertion was updated
+to `"test-bullets-model"` (the value the test's fake provider sets on `TokenUsage`). This is the
+correct approach: production behavior is the specification, not the test stub's hardcoded string.
+
+**Consequences:**
+- Cross-user requirement IDs supplied to `generate_bullets` are silently dropped. Bullets for
+  those requirement slots are not generated. No error is surfaced to the caller.
+- All new bullet-generation cost records carry the actual model name. Existing records with
+  `model="mock"` remain in the database; historical cost queries that relied on the mock model
+  string will need to account for this if they predate this fix.
+- `_get_job_requirements` now requires `user_id` as a parameter. Any future caller must supply it.
