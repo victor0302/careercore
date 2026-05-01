@@ -1746,7 +1746,562 @@ can do so without changing the hook.
 - The ordering constraint — API call before `clearTokens()` — must be preserved. Calling
   `clearTokens()` first would remove the token needed to authenticate the server request.
 
-## ADR-057 — Healthcheck URL must include API version prefix; completeness_pct is a normalized float
+---
+
+## ADR-054 — Phase 1 security audit: four findings, severity classifications, and fix strategy
+
+**Date:** 2026-04-28  
+**Status:** Accepted
+
+**Context:**  
+After all six Phase 1 audit items (issues #127–#132) were resolved and merged, a dedicated
+security pass was conducted covering: object storage access controls, credential hygiene,
+file upload input validation, HTTP middleware configuration, auth token handling, and
+injection surface. The audit used the threat model of an external attacker with read access
+to the public repo and a registered account on the running application.
+
+**Findings and decisions:**
+
+**Finding 1 — MinIO bucket has anonymous public-read policy (Critical, issue #146)**
+
+The `storage_init` container runs `mc anonymous set download local/careercore-uploads`,
+which grants unauthenticated HTTP GET access to every object in the bucket. The backend
+already generates presigned URLs with a configurable TTL for all file downloads; the
+anonymous policy makes that mechanism meaningless because the objects are directly
+accessible to anyone who can construct or guess the storage key pattern
+(`{user_id}/{file_id}.{ext}`).
+
+Decision: Remove the `mc anonymous set download` line. The presigned URL system is the
+correct access control; no anonymous bucket policy is needed or wanted. This is a pure
+removal — no application code changes required.
+
+**Finding 2 — Storage key extension derived from user-controlled filename (High, issue #147)**
+
+`FileService.upload` calls `Path(filename).suffix.lower()` where `filename` is the
+user-supplied upload name, then constructs the storage key as `{user_id}/{file_id}{suffix}`.
+An attacker who uploads a file named `resume.pdf.php` causes the object in MinIO to carry a
+`.php` suffix. Combined with finding 1 (public bucket), this allows serving an
+arbitrary-extension object from public storage. With the bucket locked, it is still an
+incorrect design — the key should not be influenced by user input.
+
+Decision: Derive the storage key extension from the validated `content_type`, not the
+filename. A `_MIME_TO_EXT` dict maps each allowed MIME type to its canonical extension.
+`original_filename` is still stored on the `UploadedFile` record unchanged for display
+purposes; only the storage key derivation changes.
+
+Why not strip or sanitize the filename instead? Sanitization is a fragile mitigation
+against a structural problem. If the extension comes from a validated, server-controlled
+mapping there is no user input to sanitize. The fix is simpler and more obviously correct.
+
+**Finding 3 — Hardcoded service credentials in docker-compose.yml (High, issue #148)**
+
+PostgreSQL password (`careercore`) and MinIO root credentials (`minioadmin`/`minioadmin`)
+are baked into `docker-compose.yml` with no override mechanism. Cloning the repo gives a
+fully functional credential set. The `.env.example` documents `MINIO_ACCESS_KEY` and
+`MINIO_SECRET_KEY` for the application layer, but the compose-level service credentials
+are separate and never sourced from environment.
+
+Decision: Replace hardcoded values with compose variable interpolation
+(`${POSTGRES_PASSWORD:-careercore}`, etc.) so they can be overridden in any environment
+that sources a `.env` file. The `:-default` syntax preserves the current behavior for
+local development (no `.env` change required). Document all four variables in `.env.example`
+with a prominent "CHANGE FOR PRODUCTION" comment.
+
+Why keep defaults at all? Breaking local development to force credential changes is an
+unreasonable burden during Phase 1. The defaults remain; they are now clearly documented
+as insecure defaults rather than silent values.
+
+**Finding 4 — CORS allows wildcard methods and headers (Medium, issue #149)**
+
+`allow_methods=["*"]` and `allow_headers=["*"]` in `main.py`. Origin allowlisting is
+correct, but the wildcard method and header sets grant any allowed origin permission to
+use any HTTP method and send any header. This is broader than the API requires.
+
+Decision: Replace with explicit lists. Methods: `["GET", "POST", "PATCH", "DELETE",
+"OPTIONS"]`. Headers: `["Content-Type", "Authorization"]`. These are the only methods the
+API exposes and the only headers the frontend sends. This is a strict tightening that
+cannot break any existing client; if a method or header is needed in future it is added
+explicitly.
+
+**Why record these as an ADR and not just as issue descriptions?**  
+The issue descriptions record what to fix. This ADR records why each fix was chosen over
+alternatives and documents the reasoning that should survive PR review. It also establishes
+that a security audit was conducted and what its scope was, which is relevant for the
+capstone submission.
+
+**Consequences:**
+- Issues #146 and #147 should be fixed in a single PR because they compound each other:
+  the public bucket makes the bad extension directly exploitable. Fixing only one leaves
+  residual risk.
+- Issues #148 and #149 are independent and can be fixed in separate PRs.
+- After #146 is merged, presigned URLs become the only file access path. Tests that
+  bypass presigned URLs by hitting the bucket directly (if any exist) will break — this
+  is intentional.
+- The Redis password-less configuration and plain-HTTP MinIO endpoint are not tracked as
+  issues because they are acceptable risks within a local Docker-only Phase 1 deployment.
+  Both must be addressed before any cloud deployment.
+
+---
+
+## ADR-055 — Nav component: null-render auth guard, startsWith active detection, inline-SVG hamburger
+
+**Date:** 2026-04-27 (PR #137, issue #129)  
+**Status:** Accepted
+
+**Context:**  
+Issue #129 added a persistent navigation header to the Next.js App Router root layout.
+Three design questions needed explicit decisions: how to gate the nav on auth state without
+causing a flash or breaking auth pages, how to detect the active route correctly across
+nested paths, and how to implement a responsive mobile menu without a third-party library.
+
+**Decision 1 — Return `null` during loading and when unauthenticated:**
+
+`Nav` calls `useAuth()` first. If `isLoading` is `true` it returns `null`; if
+`!isAuthenticated` it also returns `null`. No skeleton, no placeholder, no redirect.
+
+The alternative — rendering a loading skeleton — would produce a visible flicker: the
+skeleton appears, then is replaced by the real nav (authenticated) or nothing (auth pages).
+Because auth state resolves quickly (a `sessionStorage` read + one API call), returning
+`null` is invisible. The `isLoading` guard is required: without it, the nav momentarily
+renders as unauthenticated (before the effect runs), producing a flash on authenticated
+pages or a brief nav appearance on the login page.
+
+**Decision 2 — Active route detection uses `pathname === href || pathname.startsWith(href + "/")`:**
+
+`pathname.includes(href)` was rejected: it would activate the Jobs link on any path
+containing the string "jobs" anywhere. The exact-match-or-prefix approach is unambiguous —
+only paths that are the link's exact route or a strict child trigger the active style.
+The `+ "/"` suffix prevents false positives from paths that share a string prefix but are
+not children (e.g., a hypothetical `/resumes-archived` would not match `/resumes`).
+
+**Decision 3 — Mobile menu is a `useState`-toggled drawer with an inline SVG hamburger:**
+
+A `menuOpen: boolean` state variable controls a `<div>` beneath the header that stacks the
+four nav links vertically on `md:hidden` viewports. Each link closes the drawer on click.
+The hamburger uses a hand-authored three-line SVG with `aria-label` on the button and
+`aria-hidden` on the SVG. No icon library is introduced (prohibited by the issue spec).
+
+A CSS-only toggle (checkbox hack) was rejected for broken keyboard navigation in some
+browsers. Always-visible stacked links were rejected for the vertical space cost on mobile.
+
+**Decision 4 — `Nav` is rendered inside `<Providers>`, not outside:**
+
+`useAuth` depends on the React Query client provided by `<Providers>`. Rendering `Nav`
+outside `<Providers>` would throw at runtime. `layout.tsx` itself remains a server
+component — importing a client component from a server component is supported by the
+Next.js App Router.
+
+**Consequences:**
+- Auth pages render without any nav bar with no special casing needed in those pages.
+- Adding a new top-level nav entry is a one-line change to `NAV_LINKS` in `Nav.tsx`.
+- The inline SVG is dependency-free; replace it with a library icon if the project adopts
+  one (Lucide, Heroicons).
+- The `isLoading → null` guard is load-bearing and must not be removed.
+
+---
+
+## ADR-056 — Bullet generation selectors: dependent queries, requirement_id vs id, three-way requirements branch
+
+**Date:** 2026-04-27 (PR #139, issue #130)  
+**Status:** Accepted
+
+**Context:**  
+The resume workflow page's "Generate Bullets" section previously exposed raw UUID inputs
+that required users to know internal database identifiers. Three design decisions arose
+when replacing them with live-data selectors: how to handle the resume→job dependency
+chain, which field to use as the checkbox value for requirements, and how to handle the
+three distinct states of the job/analysis relationship.
+
+**Decision 1 — Dependent query chain via `enabled: !!jobId`:**
+
+The job detail query (`GET /api/v1/jobs/{job_id}`) cannot run until `job_id` is known,
+which requires the resume record (`GET /api/v1/resumes/{resume_id}`). TanStack Query v5's
+`enabled` option is the idiomatic mechanism for dependent queries. Setting
+`enabled: !!jobId` means the query does not fire when `jobId` is `null` (resume has no
+linked job) or `undefined` (resume not yet fetched). The alternative — fetching job detail
+unconditionally with a null-safe path — would produce a spurious `GET /api/v1/jobs/null`
+request on every page load for resumes without a linked job.
+
+**Decision 2 — Use `requirement_id` (FK), not `id` (row PK), as the checkbox value:**
+
+`MatchedRequirementRead` and `MissingRequirementRead` both have an `id` field (the primary
+key of the analysis match/gap table row) and a `requirement_id` field (FK to
+`job_requirements.id`). `BulletsGenerateRequest.requirement_ids` accepts
+`job_requirements` PKs — i.e., `requirement_id`. Using `id` would send the wrong
+identifier and the backend would fail silently or return a 404. The two UUID fields look
+identical in the UI, making this a high-likelihood future mistake; the correct field is
+named explicitly in the toggle handler and the task description.
+
+**Decision 3 — Three-way branch for the requirements input:**
+
+The requirements input needs to handle three distinct states that cannot be collapsed:
+
+| State | Condition | UI |
+|---|---|---|
+| No linked job | `jobId === null` | Textarea fallback with manual paste |
+| Job not analyzed | `jobId` set, `latest_analysis === null` | Informational notice, no input |
+| Analysis available | `latest_analysis` present | Scrollable checkbox list |
+
+Collapsing the first two states (showing the textarea whenever there are no checkboxes)
+would be misleading: when the job exists but is unanalyzed, showing a textarea implies
+the user should manually paste IDs, when the correct action is to run analysis first.
+Separating them gives the user actionable guidance in each case.
+
+**Consequences:**
+- Resumes without a linked job continue to work via the textarea fallback; no regressions
+  for that use case.
+- The `["jobs", jobId]` query key uses `jobId` as its second segment. If `jobId` changes
+  (future reassignment feature), the query automatically re-fetches from cache.
+- Any refactor of the requirements selector must preserve `requirement_id` as the value,
+  not `id`. This is documented in the component and in this ADR.
+- The entity type change resets `selectedEntityId` to prevent cross-type UUID reuse.
+
+---
+
+## ADR-057 — File upload uses native fetch; session-local state proxies missing list endpoint
+
+**Date:** 2026-04-27 (PR #142, issue #131)  
+**Status:** Accepted
+
+**Context:**  
+Two design constraints governed the Phase 1 file upload UI:
+
+1. The `api.ts` fetch wrapper unconditionally sets `Content-Type: application/json` and
+   calls `JSON.stringify(body)`. Passing a `FormData` object through it produces the
+   string `"[object FormData]"` as the request body with the wrong content type — the
+   backend rejects it with 422 Unprocessable Entity.
+
+2. `GET /api/v1/files` (list all uploaded files for the authenticated user) is not
+   implemented in Phase 1. A TanStack Query `useQuery` pointed at it would 404 on every
+   page load and leave the list permanently empty or in an error state.
+
+**Decision:**  
+- File uploads bypass `api.ts` and use native `fetch` directly with no `Content-Type`
+  header. The browser sets `multipart/form-data; boundary=…` automatically when the
+  request body is a `FormData` instance. The Bearer token is attached via `getAccessToken()`
+  from `@/lib/auth` the same way other authenticated requests work.
+- Previously uploaded files are tracked in component-local `useState<FileUploadResponse[]>`.
+  New uploads are prepended to the list. The list is ephemeral — it resets on page
+  refresh. A visible note in the UI tells users this and instructs them to refresh to see
+  extraction results.
+
+**Consequences:**  
+- Multipart uploads work correctly with the existing backend without any changes to
+  `api.ts`.
+- The file list is incomplete (session-only) but honest — no stale or falsely-empty
+  query state.
+- Any future upload endpoint (avatar, attachment) must also use native `fetch`, not
+  `api.post`. The pattern should be documented at the call site.
+- When `GET /api/v1/files` is implemented (Phase 2), `FileUploadSection` should replace
+  the local state with a `useQuery` call and remove the session-only caveat from the UI.
+- `api.ts` should not be changed to support multipart as a special case — keeping it
+  JSON-only maintains a clear contract: all structured API calls go through the wrapper,
+  binary uploads go through native `fetch`.
+
+---
+
+## ADR-058 — MinIO bucket: no anonymous policy; storage key extension derived from MIME type
+
+**Date:** 2026-04-29 (PR #148, issues #146 + #147)  
+**Status:** Accepted
+
+**Context:**  
+The `storage_init` service in `docker-compose.yml` applied an anonymous read policy to the entire
+`careercore-uploads` bucket, making all stored objects world-readable. Separately, `FileService.upload()`
+derived the storage key suffix from the user-supplied filename rather than the already-validated MIME
+type. Combined, these created a path where an attacker could upload a file with a crafted extension
+(e.g., `resume.pdf.php`) and retrieve the object via a direct URL with a `.php` suffix — bypassing
+the presigned URL system entirely. Two design questions arose: (1) how to eliminate the public bucket
+access without breaking the download flow, and (2) where to derive the storage key extension from.
+
+**Decision 1 — Remove anonymous bucket policy; presigned URLs are the only download path:**
+
+The `mc anonymous set download local/careercore-uploads` line was removed from the `storage_init`
+entrypoint. Presigned URLs already provide authenticated, time-limited download access for all
+legitimate clients. There is no use case for anonymous direct object access — the presigned URL
+mechanism covers every downstream consumer (frontend download links, Celery text extraction). Making
+the bucket private by default is zero cost and eliminates the direct-access risk entirely.
+
+**Decision 2 — Derive storage key extension from `content_type`, not `filename`:**
+
+`content_type` is validated against `ALLOWED_CONTENT_TYPES` before any storage key is constructed;
+it is server-controlled. `filename` is user-supplied and must be treated as untrusted input. A
+`_MIME_TO_EXT` mapping was introduced to translate the validated MIME type to a canonical extension.
+The alternative — validating the filename extension against an allowlist — would require keeping two
+allowlists in sync and still permits attackers to observe which filenames the server accepts. Using
+`content_type` as the sole source collapses that attack surface: the extension on disk is always
+determined by the server, never the client.
+
+**Decision 3 — `original_filename` is unchanged:**
+
+The `original_filename` column on `UploadedFile` is display-only (shown in the UI as the user's
+original name). It is not used in any storage or access-control path. Preserving it unchanged
+maintains the user-visible label without creating any security risk, since the actual storage key
+is what matters for access.
+
+**Consequences:**
+- Direct object URL access to `careercore-uploads` is no longer possible. Any tooling or test that
+  assumed direct-URL access must use presigned URLs instead.
+- Storage keys always carry a MIME-derived extension (`.pdf`, `.docx`, `.txt`). Existing objects
+  uploaded before this change retain their original (potentially user-influenced) keys; only new
+  uploads are affected.
+- Adding a new allowed MIME type requires a corresponding entry in `_MIME_TO_EXT`; omitting it
+  causes a `KeyError` at upload time, which is an intentional fail-fast behavior.
+- `from pathlib import Path` was removed from `file_service.py` as it became unused.
+
+---
+
+## ADR-060 — CORS restricted to explicit methods and headers
+
+**Date:** 2026-04-29 (PR #149, issue #149)  
+**Status:** Accepted
+
+**Context:**  
+`CORSMiddleware` in `backend/app/main.py` used wildcard values for `allow_methods` and
+`allow_headers`. Origins were already restricted to a configured allowlist, but the
+wildcards allowed any HTTP verb and any request header from those origins — broader than
+the API actually requires.
+
+**Decision:**  
+Replace the wildcards with explicit lists:
+
+```python
+allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+allow_headers=["Content-Type", "Authorization"],
+```
+
+The method set covers every verb used by existing endpoints: `GET` for reads, `POST` for
+creates and auth, `PATCH` for updates, `DELETE` for removals, and `OPTIONS` for CORS
+preflight. `PUT` is unused. The header set covers the two headers the Next.js frontend
+sends: `Content-Type` for JSON/multipart bodies and `Authorization` for the Bearer token.
+`allow_credentials=True` and `allow_origins` are unchanged.
+
+**Alternatives considered:**  
+Keep wildcards. Rejected: violates least-privilege; any allowed origin could trigger
+unintended verbs or pass arbitrary headers the server is not prepared to handle.
+
+**Consequences:**  
+- CORS preflight responses now enumerate only the permitted methods and headers, reducing
+  the attack surface visible to browsers.
+- Adding a new endpoint that requires an additional custom header requires a corresponding
+  update to `allow_headers` — a deliberate forcing function for CORS review.
+- Existing integration tests are unaffected; all current frontend requests use methods and
+  headers within the new explicit lists.
+
+---
+
+## ADR-059 — Compose variable interpolation with fallback defaults for service credentials
+
+**Date:** 2026-04-29 (PR #148, issue #148)  
+**Status:** Accepted
+
+**Context:**  
+`docker-compose.yml` hard-coded four service credentials as YAML literals:
+`POSTGRES_USER`, `POSTGRES_PASSWORD`, `MINIO_ROOT_USER`, and `MINIO_ROOT_PASSWORD`.
+The same literals appeared in the `storage_init` entrypoint. This meant:
+(a) every clone of the repository exposed working default credentials with no
+override mechanism, and (b) changing the MinIO server credentials without also
+updating the `mc alias set` command would break bucket initialization at startup.
+
+**Decision — Use `${VAR:-default}` interpolation; keep safe fallback defaults:**
+
+All four hardcoded credential sites were replaced with Docker Compose variable
+interpolation using the `${VAR:-default}` form. The fallback values (`careercore`
+and `minioadmin`) match the previous literals, so local development continues to
+work without requiring a `.env` file. Production deployments supply real values via
+their deployment environment (CI secrets, ECS task definitions, Kubernetes secrets),
+causing Compose to use those values instead of the fallbacks.
+
+The alternative — requiring the variables to be set with no default — was rejected
+because it would break zero-config local dev for new contributors. The alternative
+of retaining literals and documenting overrides in `.env.example` was rejected because
+Compose never reads `.env.example`; only a `.env` file or shell environment variables
+influence interpolation.
+
+**Consequences:**
+- Operators can override any of the four credentials by setting the corresponding
+  environment variable before running `docker compose up`. No compose file edits needed.
+- Local dev is unchanged: variables default to the previous literal values.
+- `.env.example` documents all four variables with an explicit production warning so
+  operators know to change them before any cloud deployment.
+- If `POSTGRES_USER` or `POSTGRES_PASSWORD` is changed, `DATABASE_URL` in `.env`
+  must be updated to match; the DSN is not dynamically constructed from parts.
+
+---
+
+## ADR-061 — Phase 1 comprehensive audit: 14 new issues, severity classifications, and resolution strategy
+
+**Date:** 2026-04-29  
+**Status:** Accepted
+
+**Context:**  
+After all previously known Phase 1 feature and audit tickets were believed to be complete,
+a two-track audit was conducted simultaneously: a full security pass and an overall health
+check. Both agents read the entire codebase independently and reported findings without
+access to each other's output. Results were synthesized and 14 new GitHub issues were
+filed (#154–#167).
+
+A preliminary check also revealed that issues #146–#149 (the four security fixes from the
+2026-04-28 audit in ADR-054) had not been applied to the codebase. The agent implementation
+prompts had been authored but not executed. Those four issues remain open and take priority
+over everything filed here.
+
+**Key decisions and reasoning:**
+
+**#154 — IDOR on `requirement_ids` classified as High (not Critical)**
+
+A user supplying another user's `requirement_id` values causes that user's private job
+requirement text to appear verbatim in an AI prompt, leaking it into AI-generated output.
+This is a real cross-user data exfiltration. It is High rather than Critical because: (a)
+the attacker must be authenticated, (b) the leaked data is the requirement text (not PII
+or credentials), and (c) the leak is indirect — it shapes AI output rather than returning
+data in an API response. The fix (join through `JobDescription` with a `user_id` filter)
+is straightforward and has no schema migration cost.
+
+**#158 — Rate limit IP bypass classified as Medium, not High**
+
+The IP-based rate limiter is broken behind a proxy because all users share one TCP-layer
+IP. This is a real operational flaw in a deployed environment, but in the current
+Docker-only Phase 1 setup with no reverse proxy in front of the FastAPI container, the
+rate limiter does work correctly. Filed at Medium because the impact is deployment-context
+dependent and requires a specific proxy topology to exploit. The fix (ProxyHeadersMiddleware
+with trusted proxy configuration) is a one-line addition but requires documenting the
+trusted proxy setup.
+
+**#159 — Prompt injection classified as Medium**
+
+User-controlled text in AI prompts is a real attack surface. The severity is Medium rather
+than High because: (a) the attacker must have an account, (b) the scope of damage is
+limited to their own generated output (bullets, parsed requirements), and (c) the model
+cannot exfiltrate data from other users via this vector alone (that would require #154).
+The fix (XML delimiters with system prompt framing) follows Anthropic's documented prompt
+injection mitigation guidance and is low-risk to implement.
+
+**#160 — MinIO HTTP reclassified from Informational to Medium**
+
+ADR-054 noted plain-HTTP MinIO as informational ("acceptable for Phase 1 local dev"). This
+was reconsidered: the Terraform modules show the application is designed for AWS deployment,
+not just local Docker. In any environment where MinIO is on a separate network segment, the
+unencrypted credential exchange is a real risk. Filed at Medium with a configurable
+`MINIO_USE_SSL` toggle so local dev continues to work without TLS setup.
+
+**#161, #162 — Terraform storage and database gaps classified as Medium**
+
+These are not exploitable in the current Docker-only Phase 1 deployment but are production
+blockers. RDS without `storage_encrypted = true` means all data at rest is unencrypted on
+AWS EBS. S3 without server-side encryption means uploaded files are unencrypted. Both
+are one-line Terraform additions with no application code changes. Filed at Medium because
+they block any cloud deployment but have zero impact on local development.
+
+**#163 — ECS plaintext DB password classified as High**
+
+This is High because it is exploitable today by any AWS principal with
+`ecs:DescribeTaskDefinition` access on the account. The password appears in both the
+Terraform state file (where it is not masked despite `sensitive = true` on the variable)
+and in the AWS console. The fix (Secrets Manager reference in the `secrets` block) requires
+new Terraform resources and an IAM policy change — more involved than the other Terraform
+findings, justifying separate tracking.
+
+**#155 — Docker healthcheck wrong URL classified as High**
+
+The backend container never reaches a `healthy` state in docker-compose. While nothing
+currently depends on `condition: service_healthy` for the backend specifically, this is
+incorrect infrastructure behavior that would silently break any future dependency and masks
+real health failures. High because it affects operational correctness of every local
+deployment.
+
+**#156, #157 — Frontend display and cost log bugs classified as High**
+
+Both are always-wrong: the completeness percentage is always displayed as 1/100th of its
+real value (a fully complete profile shows as "1%"), and every bullet generation AI call
+is logged against the mock model pricing in production. These are not edge cases — they
+affect every user on every interaction. High severity despite having simple fixes.
+
+**What was deferred (not filed as issues):**
+
+- **Non-atomic INCR/EXPIRE rate limit** (Finding 7): The window where a key could be
+  created without a TTL requires a process crash between two Redis commands. The blast
+  radius is a permanently rate-limited IP, which an operator can clear by flushing the
+  key. Acceptable Phase 1 risk; use a Lua pipeline if this is still present at Phase 2.
+- **SQLAlchemy echo logs SQL in dev** (Finding 9): This is intentional behavior for
+  development debugging. Staging/CI pipelines should set `APP_ENV=production` to disable it.
+- **Health endpoint discloses version and service status** (Finding 8): Acceptable for
+  Phase 1. The version and per-service status aid debugging. Lock it down before public
+  deployment.
+- **CloudWatch logs unencrypted** (Finding 19): Low priority; add KMS key before
+  compliance review.
+- **EvidenceLink and analysis table FK gaps** (L-1, L-2): Polymorphic FK patterns are
+  complex; accepted for Phase 1 with a cleanup note.
+- **Redis pool per health call** (L-5): Functionally correct; the efficiency improvement
+  is not worth Phase 1 scope.
+- **SSR URL localhost issue** (L-6): All pages are currently client components; the issue
+  will only manifest if a server component is added. Not a Phase 1 concern.
+
+**Consequences:**
+
+- Issues #146–#149 must be implemented before any new tickets are addressed. Their
+  implementation prompts exist from the prior session.
+- The IDOR fix (#154) should be treated as a security patch and fast-tracked alongside
+  #146–#149.
+- Terraform tickets (#161–#163) can be batched into a single "infra hardening" PR since
+  they are all in the same modules and touch no application code.
+- The health bugs (#155, #156, #157) are quick wins that can be batched into one PR.
+- The resolution order documented in notes.md section 15 is the recommended sequence.
+
+---
+
+## ADR-062 — Ownership join in `_get_job_requirements`; `usage.model` for cost log
+
+**Date:** 2026-05-01 (PR #155, issues #154 + #157)  
+**Status:** Accepted
+
+**Context:**  
+`ResumeService.generate_bullets` called `_get_job_requirements(requirement_ids)` with no ownership
+check, allowing any authenticated user to supply requirement IDs from another user's private job
+description — an IDOR. Separately, `cost_service.log_call` hardcoded `model="mock"` rather than
+reading the model name from the `TokenUsage` object returned by the AI provider, causing all
+cost records in production to be attributed to the wrong model. Two design decisions arose:
+(1) how to enforce ownership on requirement fetches without adding a new error path, and (2)
+where to source the model name.
+
+**Decision 1 — Join through `JobDescription` to enforce ownership; silent filter on mismatch:**
+
+`JobRequirement` rows do not carry a `user_id` directly; ownership flows through `JobDescription`.
+The fix adds a `.join(JobDescription, JobDescription.id == JobRequirement.job_id)` and filters on
+`JobDescription.user_id == user_id`. Requirements that do not belong to the requesting user are
+simply not returned — the method returns a shorter list rather than raising. The alternative —
+raising `PermissionError` when any requirement ID is foreign — would require a separate count
+query to distinguish "not found" from "not yours," adding complexity. The silent-filter approach
+is safe because `generate_bullets` already handles an empty requirements list (it produces no
+bullets, which is the correct outcome when the caller supplies invalid IDs). Callers cannot
+distinguish their own missing IDs from cross-user IDs, which is the desired behavior.
+
+**Decision 2 — Source model name from `usage.model`, not a string literal:**
+
+The `TokenUsage` object returned by `self._ai.generate_bullets(contexts)` carries the model name
+set by whichever AI provider is active. Using `usage.model` ensures that cost records always
+reflect the actual provider and model, and that the cost log stays correct as providers change
+or the model is upgraded. Hardcoding `"mock"` was a development artifact — the mock provider
+sets its own model name on `TokenUsage`, so `usage.model` works correctly in tests as well.
+
+**Decision 3 — Update the test assertion, not the production constant:**
+
+The existing test `test_generate_bullets_discards_invalid_evidence_and_logs_usage` asserted
+`model == "mock"`, which validated the bug rather than the contract. The assertion was updated
+to `"test-bullets-model"` (the value the test's fake provider sets on `TokenUsage`). This is the
+correct approach: production behavior is the specification, not the test stub's hardcoded string.
+
+**Consequences:**
+- Cross-user requirement IDs supplied to `generate_bullets` are silently dropped. Bullets for
+  those requirement slots are not generated. No error is surfaced to the caller.
+- All new bullet-generation cost records carry the actual model name. Existing records with
+  `model="mock"` remain in the database; historical cost queries that relied on the mock model
+  string will need to account for this if they predate this fix.
+- `_get_job_requirements` now requires `user_id` as a parameter. Any future caller must supply it.
+
+---
+
+## ADR-063 — Healthcheck URL must include API version prefix; completeness_pct is a normalized float
 
 **Date:** 2026-05-01 (issues #155, #156)  
 **Status:** Accepted

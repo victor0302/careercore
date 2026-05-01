@@ -3,12 +3,14 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, ApiRequestError } from "@/lib/api";
+import { getAccessToken } from "@/lib/auth";
 import type {
   MasterProfile,
   WorkExperience,
   Project,
   Skill,
   Certification,
+  FileUploadResponse,
 } from "@/types";
 
 // ── Style constants ───────────────────────────────────────────────────────────
@@ -1120,6 +1122,167 @@ function CertificationsSection() {
   );
 }
 
+// ── File upload ───────────────────────────────────────────────────────────────
+
+const ALLOWED_TYPES = [
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+];
+const MAX_BYTES = 10 * 1024 * 1024;
+
+function FileUploadSection() {
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState<FileUploadResponse[]>([]);
+  const [inputKey, setInputKey] = useState(0);
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setValidationError(null);
+    setUploadError(null);
+    const file = e.target.files?.[0] ?? null;
+    if (!file) {
+      setSelectedFile(null);
+      return;
+    }
+    if (!ALLOWED_TYPES.includes(file.type)) {
+      setValidationError("Only PDF and DOCX files are supported.");
+      setSelectedFile(null);
+      return;
+    }
+    if (file.size > MAX_BYTES) {
+      setValidationError("File must be 10 MB or smaller.");
+      setSelectedFile(null);
+      return;
+    }
+    setSelectedFile(file);
+  }
+
+  async function handleUpload(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedFile) return;
+
+    setUploading(true);
+    setUploadError(null);
+
+    try {
+      const token = getAccessToken();
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+      const res = await fetch(`${apiUrl}/api/v1/files`, {
+        method: "POST",
+        credentials: "include",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: formData,
+      });
+
+      if (!res.ok) {
+        if (res.status === 413) {
+          setUploadError("File is too large (max 10 MB).");
+        } else if (res.status === 415) {
+          setUploadError("File type not supported. Use PDF or DOCX.");
+        } else if (res.status === 401) {
+          setUploadError("Session expired. Please log in again.");
+        } else {
+          const body = await res.json().catch(() => ({ detail: "Upload failed." }));
+          setUploadError((body as { detail: string }).detail ?? "Upload failed.");
+        }
+        return;
+      }
+
+      const data = (await res.json()) as FileUploadResponse;
+      setUploadedFiles((prev) => [data, ...prev]);
+      setSelectedFile(null);
+      setInputKey((k) => k + 1);
+    } catch {
+      setUploadError("Network error. Please try again.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  const statusBadgeClass = (status: string) => {
+    switch (status) {
+      case "ready":
+        return "bg-green-100 text-green-800";
+      case "error":
+        return "bg-red-100 text-red-800";
+      case "processing":
+        return "bg-blue-100 text-blue-800";
+      default:
+        return "bg-yellow-100 text-yellow-800";
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-6 space-y-4">
+      <h2 className="text-lg font-semibold">Import from file</h2>
+      <p className="text-sm text-muted-foreground">
+        Upload a PDF or DOCX résumé to auto-populate your work experience and
+        projects. Extraction runs in the background.
+      </p>
+
+      <form onSubmit={handleUpload} className="flex flex-col gap-3 sm:flex-row sm:items-end">
+        <div className="flex-1 space-y-1">
+          <label className="text-sm font-medium" htmlFor="resume-file">
+            Résumé file
+          </label>
+          <input
+            id="resume-file"
+            key={inputKey}
+            type="file"
+            accept=".pdf,.docx"
+            onChange={handleFileChange}
+            className="block w-full text-sm text-foreground file:mr-3 file:rounded-md file:border-0 file:bg-primary file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-primary-foreground hover:file:opacity-90"
+          />
+          {validationError && (
+            <p className="text-xs text-destructive">{validationError}</p>
+          )}
+        </div>
+        <button
+          type="submit"
+          disabled={!selectedFile || uploading}
+          className={BTN_PRIMARY}
+        >
+          {uploading ? "Uploading…" : "Upload"}
+        </button>
+      </form>
+
+      {uploadError && (
+        <p className="text-sm text-destructive">{uploadError}</p>
+      )}
+
+      {uploadedFiles.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            Showing files uploaded this session. Refresh the page to see
+            extraction results.
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Extraction is running in the background. Refresh your profile to
+            see new data.
+          </p>
+          <ul className="divide-y divide-border rounded-md border border-border">
+            {uploadedFiles.map((f) => (
+              <li key={f.id} className="flex items-center justify-between px-4 py-2">
+                <span className="text-sm truncate max-w-xs">{f.filename}</span>
+                <span
+                  className={`ml-3 rounded-full px-2 py-0.5 text-xs font-medium ${statusBadgeClass(f.status)}`}
+                >
+                  {f.status}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function ProfilePage() {
@@ -1135,6 +1298,8 @@ export default function ProfilePage() {
       </div>
 
       <BasicInfoSection />
+
+      <FileUploadSection />
 
       <section className="space-y-4">
         <div className="flex gap-1 border-b border-border">
