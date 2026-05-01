@@ -4385,3 +4385,78 @@ timeout), the server will return 401. The `catch {}` block absorbs this silently
 `finally` block still clears local state. The refresh cookie in this scenario will expire
 on its own schedule — the server-side invalidation only succeeds when a valid access token
 is present.
+
+### 12.48 Issues #154 + #157 — IDOR on requirement_ids and hardcoded model in cost log (PR #155)
+
+Two bugs in `backend/app/services/resume_service.py` were fixed together because they both live
+in the same call path (`generate_bullets`) and are independently reviewable with no file overlap
+with other concurrent branches.
+
+**Issue #154 — IDOR on `_get_job_requirements` (High security)**
+
+`_get_job_requirements` fetched `JobRequirement` rows by ID with no ownership check:
+
+```python
+result = await self._db.execute(
+    select(JobRequirement).where(JobRequirement.id.in_(requirement_ids))
+)
+```
+
+A user who knew (or guessed) requirement IDs belonging to another user's private job description
+could supply those IDs at bullet-generation time. The method would return them without complaint,
+and their text would be injected verbatim into the Anthropic prompt — leaking the other user's
+private data to the AI and into the generated bullets.
+
+The fix adds a `user_id: uuid.UUID` parameter and joins through `JobDescription`, which carries
+the `user_id` foreign key:
+
+```python
+result = await self._db.execute(
+    select(JobRequirement)
+    .join(JobDescription, JobDescription.id == JobRequirement.job_id)
+    .where(
+        JobRequirement.id.in_(requirement_ids),
+        JobDescription.user_id == user_id,
+    )
+)
+```
+
+Requirements that belong to another user are simply not returned (they filter out silently rather
+than raising), so no new error path is introduced. The call site at line 192 was updated to pass
+`user.id`. `JobDescription` was already imported at line 13.
+
+**Issue #157 — `model="mock"` hardcoded in `cost_service.log_call()`**
+
+Line 244 hardcoded `model="mock"` regardless of the active AI provider:
+
+```python
+await cost_service.log_call(
+    ...
+    model="mock",
+    ...
+)
+```
+
+In production this attributed all bullet-generation cost records to the non-existent `"mock"` model,
+causing every cost calculation to use the wrong per-token rate. The `TokenUsage` object returned
+from `self._ai.generate_bullets(contexts)` already carries the correct model name from whichever
+provider is active (`usage.model`). The fix is a one-line change:
+
+```python
+model=usage.model,
+```
+
+The unit test `test_generate_bullets_discards_invalid_evidence_and_logs_usage` was asserting
+`cost_service.logged_calls[0]["model"] == "mock"`. This assertion was wrong — it was testing
+the old incorrect behavior. It was updated to assert `"test-bullets-model"`, which is the model
+name the test's fake AI provider sets on its `TokenUsage` stub.
+
+Real issues encountered:
+
+The test assertion needed to be updated alongside the service change. This was intentional: the
+test was validating a bug, not a contract.
+
+What future contributors should understand:
+
+Any new method that fetches rows by user-supplied ID must join through a table that carries `user_id`
+and filter on it. Fetching by ID alone is an IDOR if the IDs are user-controlled.

@@ -189,7 +189,7 @@ class ResumeService:
         entity_summary = await self._get_profile_entity_summary(
             user.id, profile_entity_type, profile_entity_id
         )
-        requirements = await self._get_job_requirements(requirement_ids)
+        requirements = await self._get_job_requirements(requirement_ids, user.id)
 
         cost_service = AICostService(self._db)
         await cost_service.check_budget(user)
@@ -241,7 +241,7 @@ class ResumeService:
         await cost_service.log_call(
             user_id=user.id,
             call_type=AICallType.generate_bullets,
-            model="mock",
+            model=usage.model,
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
             latency_ms=latency_ms,
@@ -353,10 +353,17 @@ class ResumeService:
             raise ValueError("Project not found.")
         return entity.name
 
-    async def _get_job_requirements(self, requirement_ids: list[uuid.UUID]) -> list[JobRequirement]:
+    async def _get_job_requirements(
+        self, requirement_ids: list[uuid.UUID], user_id: uuid.UUID
+    ) -> list[JobRequirement]:
         if not requirement_ids:
             return []
         result = await self._db.execute(
-            select(JobRequirement).where(JobRequirement.id.in_(requirement_ids))
+            select(JobRequirement)
+            .join(JobDescription, JobDescription.id == JobRequirement.job_id)
+            .where(
+                JobRequirement.id.in_(requirement_ids),
+                JobDescription.user_id == user_id,
+            )
         )
         return list(result.scalars().all())
