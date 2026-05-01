@@ -4386,7 +4386,869 @@ timeout), the server will return 401. The `catch {}` block absorbs this silently
 on its own schedule — the server-side invalidation only succeeds when a valid access token
 is present.
 
-### 12.50 Issues #161, #162, #163 — Terraform hardening: RDS encryption, S3 SSE, ECS Secrets Manager
+### 12.48 Issue #127 — Log non-transient parse_job exceptions instead of silently swallowing
+
+Before this fix, `parse_job` in `backend/app/workers/tasks/job_tasks.py` had a bare
+`except Exception: pass` that silently discarded every non-transient failure. Any AI
+error (`InvalidOutputError`, `RateLimitError`, `ProviderUnavailableError`), `ValueError`
+from argument parsing, or unexpected model output would leave the job row with
+`parsed_at = None` and produce no trace in logs. There was no way to distinguish "task
+never ran" from "task ran and failed".
+
+What changed:
+
+- Added `import logging` and `logger = logging.getLogger(__name__)` at the top of
+  `job_tasks.py`.
+- Replaced `except Exception: pass` with:
+  ```python
+  except Exception:
+      logger.error(
+          "parse_job failed (non-transient) — job_id=%s user_id=%s",
+          job_id,
+          user_id,
+          exc_info=True,
+      )
+  ```
+  The function still returns normally — per ADR-046, job creation must succeed
+  regardless of whether parsing succeeds.
+- The `_TRANSIENT_EXCEPTIONS` retry branch (`BotoCoreError`, `SQLAlchemyError`) is
+  unchanged.
+- New test file `backend/tests/unit/workers/test_parse_job_task.py` with three tests
+  following the same `run.__func__` / `monkeypatch` pattern as
+  `test_extraction_tasks.py`:
+  - `test_parse_job_logs_non_transient_exception` — verifies one `logger.error` call
+    with `job_id`, `user_id`, and `exc_info=True`; function returns `None`.
+  - `test_parse_job_retries_on_transient_exception` — `SQLAlchemyError` raises
+    `celery.exceptions.Retry`.
+  - `test_parse_job_does_not_retry_on_non_transient_exception` — `ValueError` does not
+    propagate out of the task.
+
+Why not re-raise or retry on non-transient exceptions?
+
+ADR-046 deliberately isolates the HTTP creation response from AI provider health. A
+`ValueError` from malformed model output or an `InvalidOutputError` are not recoverable
+by retrying — they are product-state failures that leave the job in an unparsed state.
+The manual `POST /jobs/{id}/parse` endpoint exists precisely for recovery. What was
+missing was observability: operators had no log evidence that a failure occurred.
+`logger.error(exc_info=True)` gives Celery worker logs the full traceback without
+changing the task's external contract.
+
+What future contributors should understand:
+
+- Any exception that reaches `logger.error` here will appear in the worker container's
+  stdout/stderr and in whatever log aggregation system (CloudWatch, Datadog, etc.) is
+  configured for the Celery worker. No additional instrumentation is needed.
+- The `exc_info=True` kwarg is required — without it the log line has the message but
+  no traceback, which makes debugging impossible.
+- The `_TRANSIENT_EXCEPTIONS` tuple is the only place to add exception types that
+  should trigger a retry. Do not broaden it to include AI-layer exceptions; those
+  are not transient in the way that network or database errors are.
+
+### 12.49 Issue #129 — Persistent navigation header with logout button (PR #137)
+
+Before this PR, every page was isolated. There was no navigation chrome — users had to know
+URLs to move between sections. The `useAuth` hook exposed `logout()` but nothing in the app
+called it. Each page rendered its own full-screen layout with no shared header.
+
+What changed:
+
+**New — `frontend/src/components/Nav.tsx`:**
+
+A `"use client"` component responsible for the entire navigation bar. It is the only new
+client component in this PR; `layout.tsx` remains a server component.
+
+Auth-gating: calls `useAuth()` immediately. Returns `null` if `isLoading` is true (prevents
+a layout flash while auth state resolves on first mount) or if `!isAuthenticated` (auth
+pages at `/auth/*` render cleanly with no nav bar). No redirects happen inside this
+component; it is purely presentational.
+
+Structure when authenticated:
+- `<header className="border-b border-border bg-background">` wrapping a constrained
+  `<nav className="mx-auto max-w-4xl px-4 h-14 ...">`.
+- Left: a `<Link href="/dashboard">` brand with `font-semibold text-foreground`.
+- Center (desktop only, `hidden md:flex`): `<Link>` elements for Dashboard, Profile, Jobs,
+  Resumes. Link data lives in a module-level `NAV_LINKS` constant so adding a new section
+  is a one-line change.
+- Right: a "Sign out" `<button>` always visible; a hamburger `<button>` visible only on
+  mobile (`md:hidden`).
+
+Active route detection — `isActive(href)`:
+```ts
+pathname === href || pathname.startsWith(href + "/")
+```
+`usePathname()` from `"next/navigation"` provides the current pathname. The `startsWith`
+check ensures `/jobs/some-uuid` highlights Jobs, `/resumes/some-uuid/versions` highlights
+Resumes, etc. Active links get `font-semibold text-foreground`; inactive links get
+`text-muted-foreground hover:text-foreground transition-colors`.
+
+Sign out behavior:
+```ts
+const handleLogout = async () => {
+  await logout();          // calls POST /auth/logout + clears tokens (ADR-053)
+  router.push("/auth/login");
+};
+```
+`router.push` runs only after `logout()` resolves, so the redirect always happens after
+local state is cleared and the server has been notified (or the call has failed and been
+swallowed). This is the post-logout redirect caller described in ADR-053 Decision 3.
+
+Mobile responsive: `useState(false)` controls a `menuOpen` flag. When `true`, a `<div>`
+drawer renders below the header bar with `md:hidden border-t border-border` containing all
+four nav links stacked vertically. Each link closes the drawer on click via
+`onClick={() => setMenuOpen(false)}`. The hamburger uses an inline SVG (three `<line>`
+elements, `stroke="currentColor"`) with `aria-label="Toggle navigation menu"` on the button
+and `aria-hidden="true"` on the SVG. No third-party library is involved.
+
+**Updated — `frontend/src/app/layout.tsx`:**
+
+```tsx
+import { Nav } from "@/components/Nav";
+
+<Providers>
+  <Nav />
+  {children}
+</Providers>
+```
+
+`Nav` is rendered inside `<Providers>` so that `useAuth`'s internal hooks have access to
+the React Query client context. The layout file itself remains a React server component.
+
+Why return `null` during `isLoading` instead of a skeleton?
+
+The auth state resolution is fast (a single `sessionStorage` read + one `/api/v1/auth/me`
+call). A skeleton would flash a partial UI before the nav either appears or disappears.
+Returning `null` is invisible; there is no perceivable pop-in on authenticated pages because
+the nav appears once after state resolves.
+
+Why `pathname.startsWith(href + "/")` and not just `pathname.includes(href)`?
+
+`includes` would incorrectly highlight Dashboard on any path containing the string
+"dashboard" anywhere. Anchoring with `+ "/"` ensures a true path-prefix match:
+`/dashboard/settings` matches `/dashboard`; `/jobs/123` does not partially match `/job`.
+
+Why put redirect logic in Nav and not in `useAuth`?
+
+Covered by ADR-053 Decision 3: `useAuth` manages state, navigation is the caller's
+responsibility. Putting `router.push` in the hook would couple it to the Next.js App
+Router, making it non-portable and harder to test. A future settings page can call
+`await logout()` and redirect somewhere different without changing the hook.
+
+Why no icon library?
+
+No icon library is installed in the project and the task explicitly prohibits introducing
+third-party dependencies. Text labels are accessible and consistent with the rest of the UI.
+The hamburger is an inline SVG — zero additional dependencies.
+
+Real issues encountered:
+
+`node_modules` were not present in the worktree (gitignored). `npm install --prefer-offline`
+was run to install them for the TypeScript check; the resulting `package-lock.json`
+normalization (a `"peer": true` metadata field on one dev dependency) was committed with
+the feature files.
+
+What future contributors should understand:
+
+`NAV_LINKS` at the top of `Nav.tsx` is the single place to add or remove nav entries.
+The active-link logic works for any path depth automatically.
+
+If a protected route should not appear in the global nav (e.g., an admin panel), do not
+add it to `NAV_LINKS` — render a context-specific nav inside that route's layout instead.
+
+The `isLoading` guard is essential. Without it, the nav would briefly flash visible on the
+login page for the fraction of a second before `!isAuthenticated` evaluates to true.
+
+### 12.50 Issue #130 — Resume bullet generation entity/requirement selectors (PR #139)
+
+Before this PR, the "Generate Bullets" section on the resume workflow page had two raw
+UUID text inputs that no real user could fill in: a text field labeled "Profile Entity ID
+(UUID)" and a textarea labeled "Requirement IDs (one per line or comma-separated)." Both
+required knowing internal database UUIDs by heart. This PR replaces both with selectors
+driven by live API data.
+
+What changed (frontend/src/app/resumes/[resume_id]/page.tsx only):
+
+**New queries:**
+
+Four new `useQuery` calls were added alongside the existing `versionsKey` query:
+
+- `["resumes", resumeId]` → `GET /api/v1/resumes/{resume_id}` → `ResumeRead`. The resume
+  record is needed solely to obtain `job_id`, which gates the job detail query.
+- `["profile", "experience"]` → `GET /api/v1/profile/experience` → `WorkExperience[]`.
+  Fetched unconditionally so the dropdown is ready when the user selects Work Experience.
+- `["profile", "projects"]` → `GET /api/v1/profile/projects` → `Project[]`. Same pattern.
+- `["jobs", jobId]` → `GET /api/v1/jobs/{jobId}` → `JobDetailRead`. Gated with
+  `enabled: !!jobId` — only fires when the resume has a linked job.
+
+**State changes:**
+
+Removed `entityId: string` and `requirementsRaw: string`.
+Added `selectedEntityId: string` (defaults `""`), `selectedRequirementIds: string[]`
+(defaults `[]`), and `rawIds: string` (fallback textarea for the no-job case).
+
+**Entity dropdown:**
+
+The `entityType` select already existed. The new entity dropdown below it renders
+differently based on `entityType`:
+- `"work_experience"` → options from `experiences`, labeled `"{role_title} at {employer}"`,
+  value = `experience.id`
+- `"project"` → options from `projects`, labeled `project.name`, value = `project.id`
+
+Changing `entityType` resets `selectedEntityId` to `""` so the previous selection is
+not silently carried over to a different entity type.
+Shows "Loading..." while the relevant query has not resolved.
+
+**Requirements selector — three-way branch:**
+
+1. `jobId === null` (resume has no linked job): renders the original textarea bound to
+   `rawIds`. Parsed the same way as before (`split(/[\n,]+/)`, trim, filter). Shows a
+   notice: "This resume has no linked job. Paste requirement IDs manually."
+
+2. `jobId` is set but `jobDetail?.latest_analysis` is null (job exists but not analyzed):
+   renders an informational notice: "Job has not been analyzed yet — run analysis from
+   the Jobs page first." No input is rendered.
+
+3. `jobDetail.latest_analysis` is present: renders a scrollable checkbox list (max height
+   16rem, overflow-y scroll). Matched requirements are labeled
+   `"{match_type} — {confidence}% confidence"`. Missing requirements are labeled
+   `"Missing — {suggested_action ?? 'No suggestion'}"` in amber. Checkbox `value` and
+   the toggle handler both use `requirement_id` (the FK to the `JobRequirement` row),
+   not `id` (the `JobAnalysisMatch` / `JobAnalysisGap` row ID). `requirement_id` is
+   what `BulletsGenerateRequest.requirement_ids` expects.
+
+**handleGenerate update:**
+
+The requirement IDs are assembled from `selectedRequirementIds` when `jobId` is set, or
+from the parsed `rawIds` fallback when it is not. Two client-side guards run before the
+API call: if `selectedEntityId` is empty, or if the assembled `requirementIds` array is
+empty, an error is shown and submission is aborted. The `BulletsGenerateRequest` body and
+all downstream logic are unchanged.
+
+Why `enabled: !!jobId` instead of always fetching job detail?
+
+Resumes can exist without a linked job (the `job_id` column is nullable). Without the
+guard, `GET /api/v1/jobs/null` would fire on every page load, return a 422/404, and log
+an error. `enabled: !!jobId` is TanStack Query v5's idiomatic way to express a dependent
+query.
+
+Why `requirement_id` and not `id` for checkbox values?
+
+`MatchedRequirementRead.id` is the primary key of the `job_analysis_matches` table row.
+`MatchedRequirementRead.requirement_id` is the FK that references `job_requirements.id`.
+`BulletsGenerateRequest.requirement_ids` is documented as a list of `job_requirements`
+PKs. Using `id` would send the wrong foreign key and the backend would fail to find the
+requirements. The field names are similar enough that this is a common mistake; the
+comment is left in the checkbox render to make the intent clear.
+
+Why reset `selectedEntityId` on `entityType` change?
+
+A work experience ID and a project ID are both UUIDs. Without a reset, switching from
+"Work Experience" to "Project" would silently carry over a work experience UUID as the
+selected project entity ID, causing a backend 404 or ownership error when generating.
+
+Real issues encountered:
+
+Node modules were not installed in the worktree environment, so `npx tsc --noEmit` could
+not run. The types are straightforward: all new query results are typed against existing
+interfaces from `@/types`, the checkbox toggle uses `string[]` state, and the three-way
+branch is plain conditional JSX with no new generic type parameters.
+
+What future contributors should understand:
+
+The requirements checkbox list uses `requirement_id` (FK), not `id` (row PK). This
+distinction must be preserved if the selector is ever refactored or extended.
+
+If the resume's `job_id` changes (e.g., a reassignment endpoint is added), the
+`["jobs", jobId]` query will automatically invalidate and re-fetch because `jobId` is
+derived from the `["resumes", resumeId]` query result, which is in the query cache.
+
+The textarea fallback for the no-job case is intentional: it preserves backward
+compatibility for resumes that are not linked to a specific job posting, which is a
+valid use case (e.g., a general-purpose resume).
+
+### 12.51 Issue #131 — File upload UI for resume PDF extraction (PR #142)
+
+Before this PR the backend file pipeline (upload, extraction, status) was fully
+implemented but there was no frontend surface for it. Users had no way to import a
+résumé without writing raw API calls.
+
+What changed:
+
+- Added `FileUploadResponse` interface to `frontend/src/types/index.ts` (`id`, `status`,
+  `filename`) matching the backend `POST /api/v1/files` response schema.
+- Added `FileUploadSection` component in `frontend/src/app/profile/page.tsx`, inserted
+  between `BasicInfoSection` and the tabbed section in `ProfilePage`.
+- Client-side validation runs on file selection (not on submit), rejecting non-PDF/DOCX
+  MIME types and files over 10 MB immediately with clear error messages.
+- Upload uses `fetch` directly instead of `api.post`. The `api` wrapper always sets
+  `Content-Type: application/json`, which would override the browser-generated
+  `multipart/form-data` boundary and break the upload. Native `fetch` with no
+  `Content-Type` header lets the browser set it correctly (see ADR-057).
+- Status-code-to-message mapping: 413 → file too large, 415 → unsupported type, 401 →
+  session expired, other → parses `{detail}` from the JSON response body.
+- `GET /api/v1/files` does not exist in Phase 1. Previously uploaded files cannot be
+  listed from the backend. The component tracks files uploaded in the current browser
+  session using `useState<FileUploadResponse[]>` and displays them with a note:
+  "Showing files uploaded this session. Refresh the page to see extraction results."
+  (see ADR-057).
+- File input resets after a successful upload via an incrementing `key` prop
+  (`inputKey` state) — cleaner than `ref.current.value = ""` for controlled React
+  inputs.
+- `tsc --noEmit` passes with zero errors.
+
+Why native `fetch` and not `api.post`:
+
+`api.ts` always calls `JSON.stringify(body)` and sets `Content-Type: application/json`.
+For `FormData`, this produces a malformed request body (the stringified `[object FormData]`
+literal) with the wrong content type. The backend responds 422 or 400 because it receives
+JSON instead of a multipart stream. Using native `fetch` without a manual `Content-Type`
+header causes the browser to generate the correct `multipart/form-data; boundary=…`
+header automatically.
+
+Why session-local state and not a list query:
+
+The backend `GET /api/v1/files` endpoint is not implemented in Phase 1. Calling it would
+return a 404 on every page load. Session-local state gives the user immediate feedback on
+files they have just uploaded without creating a permanently broken query. The Phase 2
+work item is to implement the list endpoint and replace the local state with a TanStack
+Query `useQuery`.
+
+What future contributors should understand:
+
+- When adding any multipart or binary upload endpoint, always use native `fetch` — never
+  route through `api.ts`. Add a comment at the call site referencing ADR-057.
+- The `FileUploadResponse.status` field reflects the backend `filestatus` enum
+  (`pending` → `processing` → `ready` | `error`). Do not infer status from the upload
+  response alone; it will always be `pending` at that point.
+- The session-local file list is intentionally ephemeral. Refreshing the page clears it.
+  This is documented in the UI. Phase 2 must add `GET /api/v1/files` and replace this
+  with a real query.
+
+### 12.53 Issue #148 — Replace hardcoded service credentials with env-var interpolation (PR #148)
+
+Before this change, `docker-compose.yml` hard-coded four credentials directly as YAML
+literals: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `MINIO_ROOT_USER`, and
+`MINIO_ROOT_PASSWORD`. Anyone who cloned the repository got working default credentials
+with no indication they should ever be changed. The same literal strings also appeared in
+the `storage_init` entrypoint's `mc alias set` command, meaning the MinIO client would
+always authenticate with `minioadmin`/`minioadmin` regardless of what credentials the
+MinIO server was started with.
+
+What changed:
+
+All four credential sites in `docker-compose.yml` were updated to use Docker Compose
+variable interpolation with fallback defaults (`${VAR:-default}`):
+
+```yaml
+# db service
+POSTGRES_USER: ${POSTGRES_USER:-careercore}
+POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-careercore}
+
+# storage service
+MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+
+# storage_init entrypoint
+mc alias set local http://storage:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
+```
+
+`.env.example` received a new `Service credentials` section documenting all four variables
+with an explicit production warning comment. The defaults in the example file match the
+compose fallback defaults so local dev is unchanged out of the box.
+
+Why `${VAR:-default}` instead of requiring the variable to be set?
+
+Local development must continue to work without requiring a `.env` file. The `:-default`
+syntax instructs Compose to use the fallback when the variable is unset or empty, preserving
+zero-config startup for new contributors. Production deployments override the variables via
+their deployment environment (CI secrets, ECS task definitions, Kubernetes secrets), making
+the fallback irrelevant in those contexts.
+
+Why update `storage_init` separately from the `storage` service?
+
+`storage_init` runs `mc alias set` with explicit credentials to authenticate against the
+MinIO server. If the MinIO server is started with custom credentials but `storage_init`
+still uses hardcoded literals, bucket initialization would fail with a 403. Both sides of
+the connection must read from the same variables.
+
+Why document these in `.env.example`?
+
+`.env.example` is the authoritative reference for environment configuration. Adding the
+variables there (with a change-before-production comment) ensures operators looking for
+tunable knobs find them in the canonical place rather than needing to read the compose file.
+
+Real issues encountered:
+
+None. The change is purely mechanical: YAML literal → interpolation syntax. Compose
+interprets `${VAR:-default}` directly; no shell wrapper or extra quoting is needed.
+
+What future contributors should understand:
+
+The fallback defaults (`careercore` / `minioadmin`) are safe for local dev only. Any
+deployment that is reachable from the network must set strong values for all four variables.
+The `DATABASE_URL` in `.env.example` still embeds the default credentials in its DSN;
+if `POSTGRES_USER` or `POSTGRES_PASSWORD` is changed, `DATABASE_URL` must be updated to
+match or the backend will fail to connect.
+
+---
+
+### 12.54 Issue #149 — Restrict CORS to explicit methods and headers (PR #149)
+
+Before this change, `CORSMiddleware` in `backend/app/main.py` allowed any HTTP method and
+any request header from every configured origin:
+
+```python
+allow_methods=["*"],
+allow_headers=["*"],
+```
+
+`allow_origins` was already restricted to a configured allowlist, so the origin guard was
+correct. However, wildcarding methods and headers is broader than the API requires and
+violates the principle of least privilege: any allowed origin could send `PUT`, `DELETE`,
+`CONNECT`, or custom headers that the API never uses.
+
+What changed:
+
+Only `backend/app/main.py` was modified. The two wildcard values were replaced with
+explicit lists:
+
+```python
+allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+allow_headers=["Content-Type", "Authorization"],
+```
+
+**Methods:** `GET` (reads), `POST` (creates, auth, AI calls), `PATCH` (updates), `DELETE`
+(removals), and `OPTIONS` (preflight). `PUT` is not used by any endpoint. `OPTIONS` must
+be listed explicitly so Starlette handles CORS preflight responses correctly.
+
+**Headers:** `Content-Type` (JSON body, multipart uploads) and `Authorization` (Bearer
+token). No other custom headers are sent by the Next.js frontend.
+
+Why no other CORS changes?
+
+Origins are already correct. `allow_credentials=True` is required for the httpOnly refresh
+token cookie set by `POST /api/v1/auth/login`. No other CORS fields needed adjustment.
+
+What future contributors should understand:
+
+If a new endpoint is added that accepts a custom header (e.g., `X-Idempotency-Key`), that
+header must be added to `allow_headers` here, or browsers will block the preflight. The
+narrow allowlist is intentional — it is the forcing function that makes CORS policy
+reviews part of the normal endpoint-addition workflow.
+
+---
+
+## 14. Phase 1 security audit — findings (2026-04-28)
+
+A systematic security review of the full Phase 1 codebase was conducted after all six
+open items from the earlier Phase 1 audit (section 13) were closed. This audit focused on
+the attack surface rather than feature completeness: storage access controls, credential
+management, input validation on file handling, and HTTP security posture.
+
+### What is secure
+
+The auth stack is correct: bcrypt with 12 rounds for passwords, SHA-256 hash of the
+refresh token stored in the DB (never the raw token), httpOnly + SameSite=Lax cookie for
+the refresh token, access token in sessionStorage (not localStorage), 15-minute access
+token lifetime, DB-backed rotation that marks tokens as used, full server-side invalidation
+on logout (fixed in PR #134). JWT decodes validate the `type` claim to prevent access/refresh
+token confusion.
+
+Rate limiting is in place on auth endpoints (fixed-window, IP-keyed, 10 req / 15 min) and
+AI endpoints (sliding-window, user-keyed). File service enforces MIME allowlist and 10 MB
+size cap before touching storage. All entity ownership checks are enforced at the service
+layer; the cross-user IDOR suite (PR #114) covers nine entity types.
+
+The global exception handler scrubs stack traces in production. Docs endpoints
+(`/docs`, `/redoc`, `/openapi.json`) are disabled when `APP_ENV=production`.
+No `dangerouslySetInnerHTML` usage found in the frontend.
+
+### Open findings (tracked as GitHub issues)
+
+| Issue | Severity | Area | Finding |
+|-------|----------|------|---------|
+| #146 | Critical | infra | `storage_init` sets anonymous public-read policy on the MinIO bucket — presigned URL auth is bypassed entirely |
+| #147 | High | backend | Storage key extension derived from user-controlled filename — allows arbitrary suffix on stored object |
+| #148 | High | infra | PostgreSQL and MinIO service credentials are hardcoded in `docker-compose.yml` with no override mechanism |
+| #149 | Medium | backend | CORS configured with `allow_methods=["*"]` and `allow_headers=["*"]` — broader than the API requires |
+
+#146 and #147 are tightly coupled: the public bucket policy makes the user-controlled
+extension directly exploitable (an attacker can cause a `.php` object to be publicly
+accessible). They should be fixed in the same PR.
+
+### Informational (no issue filed)
+
+- Redis has no password (`--requirepass` not set). It is on the internal Docker network only
+  and no port is exposed to the host, so the blast radius is limited to containers on
+  `careercore-net`. Acceptable for Phase 1 local dev; add `REDIS_PASSWORD` before any
+  cloud deployment.
+- MinIO endpoint uses plain HTTP (`http://`) unconditionally. TLS termination is a Phase 2
+  infrastructure concern for any cloud deployment.
+- `POST /auth/register` returns HTTP 409 with "A user with this email already exists." —
+  email enumeration is possible. Acceptable UX tradeoff for Phase 1; revisit if user privacy
+  requirements tighten.
+
+### Recommended resolution order
+
+#146 + #147 together (one PR, bucket policy + key derivation fix) → #148 → #149.
+
+### 12.52 Issues #146 + #147 — Remove public bucket policy and derive storage key extension from MIME type (PR #148)
+
+Two compounding security issues were fixed together in a single PR because the public bucket
+made the user-controlled extension directly exploitable as a path to serving arbitrary-extension
+objects to anyone on the internet.
+
+**Issue #146 — Public read policy on MinIO bucket**
+
+`docker-compose.yml`'s `storage_init` service ran `mc anonymous set download local/careercore-uploads`
+as part of bucket initialization. This applied an anonymous read policy to the entire bucket, making
+every stored object world-readable to anyone who knew its storage key — completely bypassing the
+presigned URL system that exists specifically to enforce per-request authenticated access.
+
+The fix was surgical: remove that single `mc anonymous set download` line. The bucket now has no
+anonymous access policy. Presigned URLs remain the sole authorized download path and are unchanged.
+
+**Issue #147 — Storage key extension derived from user-controlled filename**
+
+`FileService.upload()` derived the object's storage key suffix from the uploaded filename:
+
+```python
+suffix = Path(filename).suffix.lower()
+storage_key = f"{user_id}/{file_id}{suffix}"
+```
+
+An attacker could upload a file named `resume.pdf.php`; `Path(...).suffix` returns `.php` and
+the object would be stored under a `.php` key. With the public bucket policy in place, any caller
+who constructed the key could retrieve an object with a `.php` extension — a useful primitive for
+content-type confusion attacks.
+
+The fix adds a `_MIME_TO_EXT` mapping keyed on the already-validated `content_type`:
+
+```python
+_MIME_TO_EXT = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "text/plain": ".txt",
+}
+```
+
+`suffix = Path(filename).suffix.lower()` was replaced with `suffix = _MIME_TO_EXT[content_type]`.
+Because `content_type` is validated against `ALLOWED_CONTENT_TYPES` before reaching the suffix
+derivation, a missing key is impossible in practice (a 400 would have been raised earlier). The
+`original_filename` field on the `UploadedFile` record is display-only and is stored unchanged.
+
+The unused `from pathlib import Path` import was removed as a consequence.
+
+**Why fix both in the same PR?**
+
+The issues compound: the public policy turns the extension manipulation into an immediate exploit,
+and the extension manipulation is the reason the public policy is so dangerous. Fixing one while
+leaving the other would leave a meaningful residual risk. Pairing them in a single PR also keeps
+the security narrative coherent for reviewers.
+
+Real issues encountered:
+
+None — both changes were minimal and localized. All existing upload/download tests passed unchanged.
+
+What future contributors should understand:
+
+The `_MIME_TO_EXT` mapping is the authoritative source of allowed extensions. If a new MIME type is
+added to `ALLOWED_CONTENT_TYPES`, a corresponding entry must be added to `_MIME_TO_EXT`, otherwise
+`FileService.upload()` will raise a `KeyError` at runtime for that content type.
+
+---
+
+## 15. Phase 1 comprehensive audit — health, security, and new tickets (2026-04-29)
+
+A two-track audit was run simultaneously: a security-focused pass covering all attack
+surfaces, and a health check covering code correctness, schema consistency, and operational
+gaps. Both agents read the full codebase independently. This section records what was found
+and why each item was filed as a ticket.
+
+### Critical discovery: issues #146–149 are not yet implemented
+
+The first and most important finding was that the four security issues filed on 2026-04-28
+(#146 anonymous bucket, #147 user-supplied extension, #148 hardcoded credentials, #149 CORS
+wildcards) had not been applied to the codebase. The code still contained all four
+vulnerabilities. The agent prompts generated to fix these issues had not yet been run.
+This was confirmed by reading `docker-compose.yml`, `file_service.py`, and `main.py`
+directly and by inspecting `git log main`.
+
+Consequence: #146–149 remain open and must be completed before any of the new tickets are
+addressed. The severity classifications and recommended ordering from section 14 still apply.
+
+### Security audit findings (new issues)
+
+**#154 — IDOR on `requirement_ids` in generate_bullets (High)**
+
+`resume_service._get_job_requirements` fetches `JobRequirement` rows by primary key with
+no ownership check. A user can supply requirement IDs from another user's private job
+description; the requirement text is then injected verbatim into the Anthropic prompt
+context for their own bullet generation. This is a cross-user data exfiltration via AI
+prompt. The fix is a join through `JobDescription` filtered by `user_id`.
+
+**#158 — Rate limit keys on direct TCP IP, broken behind proxy (Medium)**
+
+`rate_limit.py` uses `request.client.host` as the rate limit key. Behind any reverse proxy
+or Docker load balancer, all traffic originates from the same proxy IP, collapsing all
+users into one shared bucket. The fix is `ProxyHeadersMiddleware` with a trusted proxy
+list so `request.client.host` is correctly populated from `X-Forwarded-For`.
+
+**#159 — Prompt injection via unsanitized user data (Medium)**
+
+`anthropic_provider.py` interpolates user-supplied strings (employer name, role title,
+job description raw text) directly into AI prompts with no delimiters. An attacker who
+stores prompt injection payloads in their profile or submits a malicious job description
+can influence model behavior. The fix is XML tag delimiters around all user-controlled
+content with explicit system prompt instructions to treat them as untrusted.
+
+**#160 — MinIO communication uses HTTP — plaintext transport (Medium)**
+
+All backend-to-MinIO traffic uses `http://`, including credential exchange and file
+transfers. The fix is TLS on MinIO with a configurable `MINIO_USE_SSL` setting.
+Previously noted as informational in section 14 ("acceptable for Phase 1 local dev");
+reclassified as a filed issue because the Terraform modules show this app is intended for
+AWS deployment where the attack surface is larger.
+
+**#161 — Terraform: RDS no encryption, no backups, no deletion protection (Medium)**
+
+The RDS Terraform module omits `storage_encrypted`, sets `backup_retention_period` to the
+default of 0 (no backups), sets `skip_final_snapshot = true`, and leaves
+`deletion_protection = false`. All user data at rest is unencrypted and the database can
+be accidentally destroyed with no recovery path.
+
+**#162 — Terraform: S3 bucket no server-side encryption, no public access block (Medium)**
+
+The storage Terraform module provisions versioning but omits
+`aws_s3_bucket_server_side_encryption_configuration` and
+`aws_s3_bucket_public_access_block`. User-uploaded files are unencrypted at rest and the
+bucket lacks an explicit public-access block resource, relying solely on the bucket policy
+for access control.
+
+**#163 — Terraform: DB password in plaintext ECS environment variable (High)**
+
+The compute module passes `DATABASE_URL` (containing the database password) as a plain
+`environment` entry in the ECS task definition. Despite `var.db_password` being marked
+`sensitive`, the rendered `container_definitions` JSON is not, so the password appears in
+the Terraform state file and in the AWS ECS console task definition view. Any principal
+with `ecs:DescribeTaskDefinition` can read it. Fix is Secrets Manager with a `secrets`
+reference in the container definition.
+
+### Health check findings (new issues)
+
+**#155 — Docker healthcheck wrong URL (High)**
+
+`docker-compose.yml` healthchecks the backend at `http://localhost:8000/health`, but the
+endpoint is mounted at `/api/v1/health`. The 404 response means the backend container
+never transitions to healthy. The fix is changing the path to `/api/v1/health`.
+
+**#156 — `completeness_pct` display bug: 0–1% instead of 0–100% (High)**
+
+`profile_service.py` computes `completeness_pct` as a float in [0.0, 1.0]. The profile
+page renders `Math.round(profile.completeness_pct)%`, so a fully complete profile shows
+as "1% complete". Fix: multiply by 100 before rounding in the frontend.
+
+**#157 — `generate_bullets` hardcodes `model="mock"` in AI call log (High)**
+
+`resume_service.py` logs `model="mock"` unconditionally regardless of which AI provider
+is active. In production with `AI_PROVIDER=anthropic`, every bullet generation cost record
+is attributed to the mock model and priced at the wrong rate. Fix: use `usage.model` from
+the `TokenUsage` returned by the AI call.
+
+**#164 — `parse_job` task leaves `JobDescription` in ambiguous failure state (Medium)**
+
+When retries are exhausted, `job_tasks.py` logs the error and returns `None`. The
+`JobDescription` stays with `parsed_at=None`, which is indistinguishable from "never
+queued." Users see "Not yet analyzed" indefinitely. Fix: add a `parse_status` field
+(`pending | processing | done | failed`) with a new migration and surface the error state
+in the UI.
+
+**#165 — Unbounded free-text fields enable resource exhaustion (Medium)**
+
+`raw_text` (job description), `description_raw`, and `summary_notes` have no `max_length`
+constraints. A multi-MB `raw_text` is forwarded verbatim to the AI provider, consuming
+token budget and potentially hitting provider payload limits. `requirement_ids` has no
+item count cap. Fix: add `max_length` and `max_items` constraints at the Pydantic schema
+layer.
+
+**#166 — Frontend `User` type declares fields `UserRead` never returns (Medium)**
+
+`types/index.ts` declares `is_active: boolean` and `tier: UserTier` on the `User`
+interface, but `UserRead` only returns `id` and `email`. At runtime these fields are
+always `undefined`. TypeScript believes they exist, making any code that branches on them
+silently wrong. Fix: align the schema by either adding the fields to `UserRead` or
+removing them from the interface.
+
+**#167 — Duplicate `TokenUsage` class in `ai/schemas.py` (Low)**
+
+`TokenUsage` is defined twice in the same file. Python silently uses the second definition.
+The first is dead code that will silently diverge if edited. Fix: remove the first
+definition.
+
+### Summary of new tickets
+
+| Issue | Severity | Area | Finding |
+|-------|----------|------|---------|
+| #154 | High | security | IDOR on `requirement_ids` — cross-user job data leaks into AI prompt |
+| #155 | High | infra | Docker healthcheck hits wrong URL — backend always unhealthy |
+| #156 | High | frontend | `completeness_pct` displays as 0–1% instead of 0–100% |
+| #157 | High | backend | `generate_bullets` hardcodes `model="mock"` in cost log |
+| #158 | Medium | security | Rate limit IP broken behind proxy — audit logs record wrong IP |
+| #159 | Medium | security | Prompt injection via unsanitized user data in AI prompts |
+| #160 | Medium | security | MinIO uses HTTP — credentials and files in plaintext |
+| #161 | Medium | infra | Terraform: RDS no encryption, no backups, no deletion protection |
+| #162 | Medium | infra | Terraform: S3 no server-side encryption, no public access block |
+| #163 | High | infra | Terraform: DB password in plaintext ECS environment variable |
+| #164 | Medium | backend | `parse_job` task leaves `JobDescription` in ambiguous failure state |
+| #165 | Medium | backend | Unbounded text fields allow resource exhaustion via AI token budget |
+| #166 | Medium | frontend | Frontend `User` type has fields `UserRead` never returns |
+| #167 | Low | backend | Duplicate `TokenUsage` class — dead code maintenance hazard |
+
+### Recommended resolution order
+
+Complete #146–149 first (already have implementation prompts). Then:
+
+#154 (IDOR — security, high impact) → #155 (healthcheck — breaks deployment) →
+#156 + #157 (visible correctness bugs) → #163 (Terraform creds) →
+#161 + #162 (Terraform encryption, can be one PR) →
+#158 + #159 + #160 (security hardening, independent) →
+#164 + #165 + #166 (correctness/quality) → #167 (cleanup).
+
+### 12.55 Issues #154 + #157 — IDOR on requirement_ids and hardcoded model in cost log (PR #155)
+
+Two bugs in `backend/app/services/resume_service.py` were fixed together because they both live
+in the same call path (`generate_bullets`) and are independently reviewable with no file overlap
+with other concurrent branches.
+
+**Issue #154 — IDOR on `_get_job_requirements` (High security)**
+
+`_get_job_requirements` fetched `JobRequirement` rows by ID with no ownership check:
+
+```python
+result = await self._db.execute(
+    select(JobRequirement).where(JobRequirement.id.in_(requirement_ids))
+)
+```
+
+A user who knew (or guessed) requirement IDs belonging to another user's private job description
+could supply those IDs at bullet-generation time. The method would return them without complaint,
+and their text would be injected verbatim into the Anthropic prompt — leaking the other user's
+private data to the AI and into the generated bullets.
+
+The fix adds a `user_id: uuid.UUID` parameter and joins through `JobDescription`, which carries
+the `user_id` foreign key:
+
+```python
+result = await self._db.execute(
+    select(JobRequirement)
+    .join(JobDescription, JobDescription.id == JobRequirement.job_id)
+    .where(
+        JobRequirement.id.in_(requirement_ids),
+        JobDescription.user_id == user_id,
+    )
+)
+```
+
+Requirements that belong to another user are simply not returned (they filter out silently rather
+than raising), so no new error path is introduced. The call site at line 192 was updated to pass
+`user.id`. `JobDescription` was already imported at line 13.
+
+**Issue #157 — `model="mock"` hardcoded in `cost_service.log_call()`**
+
+Line 244 hardcoded `model="mock"` regardless of the active AI provider:
+
+```python
+await cost_service.log_call(
+    ...
+    model="mock",
+    ...
+)
+```
+
+In production this attributed all bullet-generation cost records to the non-existent `"mock"` model,
+causing every cost calculation to use the wrong per-token rate. The `TokenUsage` object returned
+from `self._ai.generate_bullets(contexts)` already carries the correct model name from whichever
+provider is active (`usage.model`). The fix is a one-line change:
+
+```python
+model=usage.model,
+```
+
+The unit test `test_generate_bullets_discards_invalid_evidence_and_logs_usage` was asserting
+`cost_service.logged_calls[0]["model"] == "mock"`. This assertion was wrong — it was testing
+the old incorrect behavior. It was updated to assert `"test-bullets-model"`, which is the model
+name the test's fake AI provider sets on its `TokenUsage` stub.
+
+Real issues encountered:
+
+The test assertion needed to be updated alongside the service change. This was intentional: the
+test was validating a bug, not a contract.
+
+What future contributors should understand:
+
+Any new method that fetches rows by user-supplied ID must join through a table that carries `user_id`
+and filter on it. Fetching by ID alone is an IDOR if the IDs are user-controlled.
+
+### 12.56 Issues #155 + #156 — Fix backend healthcheck URL and completeness_pct display
+
+Two one-line bugs discovered and fixed in this session.
+
+**Issue #155 — Docker healthcheck hits /health instead of /api/v1/health**
+
+`docker-compose.yml` line 111 ran the backend healthcheck against:
+
+```
+http://localhost:8000/health
+```
+
+The FastAPI health router is mounted at the `/api/v1` prefix in `main.py`, so the
+registered path is `/api/v1/health`, not `/health`. The bare `/health` path returns
+404, which means `curl -f` exits non-zero on every probe. Docker marks the backend
+container as unhealthy after the retry window, and any container with
+`condition: service_healthy` on the backend (none currently, but this blocks future
+dependencies) would never start.
+
+Fix: changed line 111 to:
+
+```yaml
+test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+```
+
+No other healthchecks were touched — MinIO (`/minio/health/live`), db (`pg_isready`),
+redis (`redis-cli ping`), worker (Celery inspect ping), and frontend (wget) are all
+on correct paths.
+
+**Issue #156 — completeness_pct renders as 0–1% instead of 0–100%**
+
+`profile/page.tsx` line 111 rendered:
+
+```tsx
+{Math.round(profile.completeness_pct)}% complete
+```
+
+`profile_service.py` computes `completeness_pct` as a Python float in the range
+`[0.0, 1.0]`. Passing that value directly to `Math.round()` without scaling means a
+fully complete profile (value = `1.0`) displays as "1% complete" instead of "100% complete".
+
+Fix: multiplied by 100 before rounding:
+
+```tsx
+{Math.round(profile.completeness_pct * 100)}% complete
+```
+
+This is consistent with how percentage progress values are typically surfaced from REST
+APIs: the backend stores a normalized float, the frontend is responsible for converting
+it to a human-readable percentage.
+
+Real issues encountered:
+
+`python -m pytest` is not on the system PATH; the project venv at
+`backend/.venv/bin/pytest` is the correct entrypoint. Four pre-existing test files
+fail due to SQLite/JSONB incompatibility and an alembic version import path issue —
+both unrelated to these changes. The remaining 152 unit tests pass.
+
+TypeScript type check (`npx tsc --noEmit`) completed clean after `npm ci`.
+
+### 12.57 Issues #161, #162, #163 — Terraform hardening: RDS encryption, S3 SSE, ECS Secrets Manager
 
 Three Terraform security gaps identified during the Phase 1 audit were addressed across
 three modules in `infra/terraform/modules/`.
