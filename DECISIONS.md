@@ -1745,3 +1745,74 @@ can do so without changing the hook.
   responded and local state is cleared.
 - The ordering constraint — API call before `clearTokens()` — must be preserved. Calling
   `clearTokens()` first would remove the token needed to authenticate the server request.
+
+## ADR-058 — Terraform hardening: RDS encryption+backups, S3 SSE+public-block, ECS Secrets Manager
+
+**Date:** 2026-05-01 (issues #161, #162, #163)  
+**Status:** Accepted
+
+**Context:**  
+Three Terraform modules provisioned in Phase 1 had security and reliability gaps identified
+during the audit (issue #132): the RDS instance lacked encryption, automated backups, and
+deletion protection; the S3 resume bucket lacked server-side encryption and a public-access
+block; and the ECS task definition passed `DATABASE_URL` (containing the DB password) as a
+plaintext environment variable visible in Terraform state and the AWS console.
+
+**Decision 1 — RDS: enable encryption, 7-day backups, final snapshot, deletion protection
+(`database/main.tf`):**
+
+Added `storage_encrypted = true` (AES-256 via AWS-managed KMS), `backup_retention_period = 7`
+(automated daily snapshots), `skip_final_snapshot = false` (snapshot on destroy), and
+`deletion_protection = true` (requires explicit disable before `terraform destroy`). These
+four attributes together satisfy the minimum baseline for a production relational database.
+AWS-managed KMS was chosen over a customer-managed key to avoid key rotation and access
+policy overhead at this stage. Seven days of retention covers weekend incidents and matches
+the lower bound of common compliance requirements.
+
+**Decision 2 — S3: AES256 SSE and full public-access block (`storage/main.tf`):**
+
+Added `aws_s3_bucket_server_side_encryption_configuration` with `sse_algorithm = "AES256"`
+and `aws_s3_bucket_public_access_block` with all four flags set to true. SSE-S3 (AES256)
+was chosen over SSE-KMS because the bucket policy already restricts access to the ECS task
+role, and CMK overhead is not justified at this scale. All four public-access-block flags
+are set to true as a defence-in-depth measure: even if a future change inadvertently grants
+a public ACL or policy, the block prevents it from taking effect.
+
+**Decision 3 — ECS: move DATABASE_URL to Secrets Manager via `secrets` injection
+(`compute/main.tf`):**
+
+An `aws_secretsmanager_secret` and `aws_secretsmanager_secret_version` store the
+constructed database URL. An inline IAM policy (`execution_secrets`) on the **execution
+role** grants `secretsmanager:GetSecretValue` scoped to the specific secret ARN. The
+container definition moves `DATABASE_URL` from `environment` to `secrets`. ECS resolves
+`secrets` references at task launch using the execution role, so the value never appears
+in the task definition JSON or Terraform state.
+
+`recovery_window_in_days = 0` disables the 30-day recovery window. This is appropriate
+because the secret value is fully reconstructable from Terraform input variables — if it
+is deleted and re-applied, a new version is created immediately.
+
+The execution role (not the task role) receives the `GetSecretValue` permission because
+ECS's secrets injection happens before the container starts, using the execution role.
+Granting it to the task role would not allow the launch-time injection to succeed.
+
+**Alternatives considered:**  
+- For DB credentials: pass from AWS Parameter Store instead of Secrets Manager. Rejected:
+  Secrets Manager has built-in rotation support, versioning, and is the AWS-recommended
+  path for database credentials. Parameter Store SecureString is a reasonable alternative
+  but offers less operational tooling.
+- For RDS KMS: customer-managed key. Deferred to Phase 2 when compliance requirements are
+  more precisely defined.
+
+**Consequences:**  
+- RDS data at rest is encrypted. Automated backups run daily and are retained for 7 days.
+  A final snapshot is taken before any destroy. Deletion protection must be explicitly
+  disabled before `terraform destroy` can proceed.
+- Resume files in S3 are encrypted at rest. The bucket cannot be made public through ACL
+  or policy changes while the public-access block is in effect.
+- `DATABASE_URL` is no longer visible in Terraform state or the AWS console. ECS injects
+  it at task launch from Secrets Manager. Any future credential rotation requires updating
+  the `aws_secretsmanager_secret_version` resource value.
+- Adding a new secret to the task definition requires adding a corresponding
+  `GetSecretValue` permission to the execution role — a deliberate forcing function for
+  security review.

@@ -4385,3 +4385,142 @@ timeout), the server will return 401. The `catch {}` block absorbs this silently
 `finally` block still clears local state. The refresh cookie in this scenario will expire
 on its own schedule — the server-side invalidation only succeeds when a valid access token
 is present.
+
+### 12.50 Issues #161, #162, #163 — Terraform hardening: RDS encryption, S3 SSE, ECS Secrets Manager
+
+Three Terraform security gaps identified during the Phase 1 audit were addressed across
+three modules in `infra/terraform/modules/`.
+
+**Issue #161 — RDS: no encryption, no backups, no deletion protection
+(`database/main.tf`)**
+
+The `aws_db_instance.postgres` resource had `skip_final_snapshot = true`,
+`deletion_protection = false`, and no storage encryption or backup configuration. A
+misconfigured `terraform destroy` or accidental deletion would have wiped the database
+with no recovery path.
+
+What changed: four attributes were updated in the resource block:
+
+```hcl
+storage_encrypted       = true
+backup_retention_period = 7
+skip_final_snapshot     = false
+deletion_protection     = true
+```
+
+`storage_encrypted = true` enables AES-256 encryption at rest via AWS-managed KMS for the
+RDS volume. `backup_retention_period = 7` enables automated daily snapshots retained for
+seven days, meeting the minimum recommended baseline for production databases.
+`skip_final_snapshot = false` ensures a final snapshot is taken before the instance is
+destroyed. `deletion_protection = true` requires that protection be explicitly disabled
+before `terraform destroy` can remove the instance — a safeguard against accidental
+infrastructure teardown.
+
+**Issue #162 — S3: no server-side encryption, no public access block
+(`storage/main.tf`)**
+
+The resume upload bucket had versioning and a bucket policy but no encryption and no
+explicit public-access block. An S3 bucket without a public-access block can have its ACL
+or policy changed to expose objects, and data at rest was unencrypted.
+
+What changed: two new resources appended after `aws_s3_bucket_policy.resumes`:
+
+```hcl
+resource "aws_s3_bucket_server_side_encryption_configuration" "resumes" {
+  bucket = aws_s3_bucket.resumes.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "resumes" {
+  bucket                  = aws_s3_bucket.resumes.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+```
+
+AES256 (SSE-S3) is sufficient for this use case; SSE-KMS would add key management
+overhead without additional benefit given that the bucket policy already restricts access
+to the ECS task role. All four public-access-block flags are set to true to prevent any
+future policy or ACL change from making bucket contents public.
+
+**Issue #163 — ECS: database URL in plaintext environment variable (`compute/main.tf`)**
+
+The task definition previously passed `DATABASE_URL` (containing the DB username and
+password) as a plain `environment` entry in the container definition. This value appeared
+in the Terraform state file and was visible in the AWS console under ECS task definitions.
+Anyone with read access to state or the console could extract the database password.
+
+What changed: three coordinated changes across `compute/main.tf`:
+
+1. Two new resources create an AWS Secrets Manager secret for the database URL:
+
+```hcl
+resource "aws_secretsmanager_secret" "db_url" {
+  name                    = "${var.app_name}-${var.environment}/database-url"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "db_url" {
+  secret_id     = aws_secretsmanager_secret.db_url.id
+  secret_string = "postgresql://${var.db_username}:${var.db_password}@${var.db_address}:5432/${var.db_name}"
+}
+```
+
+`recovery_window_in_days = 0` disables the default 30-day deletion recovery window.
+For a computed secret (reconstructed from input variables), this is appropriate — if the
+secret is deleted and the resource re-applied, a new version is created immediately without
+the delay.
+
+2. An inline IAM policy on the execution role grants `secretsmanager:GetSecretValue`
+   scoped to the specific secret ARN:
+
+```hcl
+resource "aws_iam_role_policy" "execution_secrets" {
+  name = "secrets-manager-db-url"
+  role = aws_iam_role.execution.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = aws_secretsmanager_secret.db_url.arn
+    }]
+  })
+}
+```
+
+The policy is on the **execution role** (not the task role) because ECS resolves `secrets`
+references at task launch time using the execution role, before the container starts.
+
+3. In the container definition, `DATABASE_URL` was removed from the `environment` block
+   and moved to a `secrets` block:
+
+```hcl
+environment = [
+  { name = "S3_BUCKET",   value = var.s3_bucket_name },
+  { name = "ENVIRONMENT", value = var.environment }
+]
+secrets = [
+  { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.db_url.arn }
+]
+```
+
+ECS Fargate injects secrets from Secrets Manager as environment variables at task startup.
+The value never appears in the task definition JSON stored in AWS or in Terraform state.
+The placeholder Phase 1 comment ("Use Secrets Manager in production") was removed since
+the fix is now in place.
+
+Why `execution_role` for secrets access and not the `task_role`?
+
+ECS's secrets injection happens during task launch, before the container process starts.
+The agent performing the injection uses the execution role. The task role is the identity
+assumed by the running container process itself. Granting `GetSecretValue` to the task role
+would not allow ECS to inject the secret at launch time.
+
+`terraform validate` passes with no errors.

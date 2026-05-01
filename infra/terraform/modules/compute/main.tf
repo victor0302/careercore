@@ -30,6 +30,19 @@ resource "aws_iam_role_policy_attachment" "execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+resource "aws_iam_role_policy" "execution_secrets" {
+  name = "secrets-manager-db-url"
+  role = aws_iam_role.execution.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = aws_secretsmanager_secret.db_url.arn
+    }]
+  })
+}
+
 # Task role — assumed by the running container (S3 access)
 resource "aws_iam_role" "task" {
   name               = "${var.app_name}-${var.environment}-ecs-task"
@@ -54,6 +67,16 @@ resource "aws_cloudwatch_log_group" "backend" {
   retention_in_days = 14
 }
 
+resource "aws_secretsmanager_secret" "db_url" {
+  name                    = "${var.app_name}-${var.environment}/database-url"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "db_url" {
+  secret_id     = aws_secretsmanager_secret.db_url.id
+  secret_string = "postgresql://${var.db_username}:${var.db_password}@${var.db_address}:5432/${var.db_name}"
+}
+
 resource "aws_ecs_task_definition" "backend" {
   family                   = "${var.app_name}-${var.environment}-backend"
   requires_compatibilities = ["FARGATE"]
@@ -63,7 +86,6 @@ resource "aws_ecs_task_definition" "backend" {
   execution_role_arn       = aws_iam_role.execution.arn
   task_role_arn            = aws_iam_role.task.arn
 
-  # Phase 1: DB credentials passed as env vars. Use Secrets Manager in production.
   container_definitions = jsonencode([{
     name      = "backend"
     image     = var.backend_image
@@ -73,9 +95,11 @@ resource "aws_ecs_task_definition" "backend" {
       protocol      = "tcp"
     }]
     environment = [
-      { name = "DATABASE_URL", value = "postgresql://${var.db_username}:${var.db_password}@${var.db_address}:5432/${var.db_name}" },
-      { name = "S3_BUCKET",    value = var.s3_bucket_name },
-      { name = "ENVIRONMENT",  value = var.environment }
+      { name = "S3_BUCKET",   value = var.s3_bucket_name },
+      { name = "ENVIRONMENT", value = var.environment }
+    ]
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.db_url.arn }
     ]
     logConfiguration = {
       logDriver = "awslogs"
