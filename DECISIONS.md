@@ -2126,3 +2126,125 @@ influence interpolation.
   operators know to change them before any cloud deployment.
 - If `POSTGRES_USER` or `POSTGRES_PASSWORD` is changed, `DATABASE_URL` in `.env`
   must be updated to match; the DSN is not dynamically constructed from parts.
+
+---
+
+## ADR-061 — Phase 1 comprehensive audit: 14 new issues, severity classifications, and resolution strategy
+
+**Date:** 2026-04-29  
+**Status:** Accepted
+
+**Context:**  
+After all previously known Phase 1 feature and audit tickets were believed to be complete,
+a two-track audit was conducted simultaneously: a full security pass and an overall health
+check. Both agents read the entire codebase independently and reported findings without
+access to each other's output. Results were synthesized and 14 new GitHub issues were
+filed (#154–#167).
+
+A preliminary check also revealed that issues #146–#149 (the four security fixes from the
+2026-04-28 audit in ADR-054) had not been applied to the codebase. The agent implementation
+prompts had been authored but not executed. Those four issues remain open and take priority
+over everything filed here.
+
+**Key decisions and reasoning:**
+
+**#154 — IDOR on `requirement_ids` classified as High (not Critical)**
+
+A user supplying another user's `requirement_id` values causes that user's private job
+requirement text to appear verbatim in an AI prompt, leaking it into AI-generated output.
+This is a real cross-user data exfiltration. It is High rather than Critical because: (a)
+the attacker must be authenticated, (b) the leaked data is the requirement text (not PII
+or credentials), and (c) the leak is indirect — it shapes AI output rather than returning
+data in an API response. The fix (join through `JobDescription` with a `user_id` filter)
+is straightforward and has no schema migration cost.
+
+**#158 — Rate limit IP bypass classified as Medium, not High**
+
+The IP-based rate limiter is broken behind a proxy because all users share one TCP-layer
+IP. This is a real operational flaw in a deployed environment, but in the current
+Docker-only Phase 1 setup with no reverse proxy in front of the FastAPI container, the
+rate limiter does work correctly. Filed at Medium because the impact is deployment-context
+dependent and requires a specific proxy topology to exploit. The fix (ProxyHeadersMiddleware
+with trusted proxy configuration) is a one-line addition but requires documenting the
+trusted proxy setup.
+
+**#159 — Prompt injection classified as Medium**
+
+User-controlled text in AI prompts is a real attack surface. The severity is Medium rather
+than High because: (a) the attacker must have an account, (b) the scope of damage is
+limited to their own generated output (bullets, parsed requirements), and (c) the model
+cannot exfiltrate data from other users via this vector alone (that would require #154).
+The fix (XML delimiters with system prompt framing) follows Anthropic's documented prompt
+injection mitigation guidance and is low-risk to implement.
+
+**#160 — MinIO HTTP reclassified from Informational to Medium**
+
+ADR-054 noted plain-HTTP MinIO as informational ("acceptable for Phase 1 local dev"). This
+was reconsidered: the Terraform modules show the application is designed for AWS deployment,
+not just local Docker. In any environment where MinIO is on a separate network segment, the
+unencrypted credential exchange is a real risk. Filed at Medium with a configurable
+`MINIO_USE_SSL` toggle so local dev continues to work without TLS setup.
+
+**#161, #162 — Terraform storage and database gaps classified as Medium**
+
+These are not exploitable in the current Docker-only Phase 1 deployment but are production
+blockers. RDS without `storage_encrypted = true` means all data at rest is unencrypted on
+AWS EBS. S3 without server-side encryption means uploaded files are unencrypted. Both
+are one-line Terraform additions with no application code changes. Filed at Medium because
+they block any cloud deployment but have zero impact on local development.
+
+**#163 — ECS plaintext DB password classified as High**
+
+This is High because it is exploitable today by any AWS principal with
+`ecs:DescribeTaskDefinition` access on the account. The password appears in both the
+Terraform state file (where it is not masked despite `sensitive = true` on the variable)
+and in the AWS console. The fix (Secrets Manager reference in the `secrets` block) requires
+new Terraform resources and an IAM policy change — more involved than the other Terraform
+findings, justifying separate tracking.
+
+**#155 — Docker healthcheck wrong URL classified as High**
+
+The backend container never reaches a `healthy` state in docker-compose. While nothing
+currently depends on `condition: service_healthy` for the backend specifically, this is
+incorrect infrastructure behavior that would silently break any future dependency and masks
+real health failures. High because it affects operational correctness of every local
+deployment.
+
+**#156, #157 — Frontend display and cost log bugs classified as High**
+
+Both are always-wrong: the completeness percentage is always displayed as 1/100th of its
+real value (a fully complete profile shows as "1%"), and every bullet generation AI call
+is logged against the mock model pricing in production. These are not edge cases — they
+affect every user on every interaction. High severity despite having simple fixes.
+
+**What was deferred (not filed as issues):**
+
+- **Non-atomic INCR/EXPIRE rate limit** (Finding 7): The window where a key could be
+  created without a TTL requires a process crash between two Redis commands. The blast
+  radius is a permanently rate-limited IP, which an operator can clear by flushing the
+  key. Acceptable Phase 1 risk; use a Lua pipeline if this is still present at Phase 2.
+- **SQLAlchemy echo logs SQL in dev** (Finding 9): This is intentional behavior for
+  development debugging. Staging/CI pipelines should set `APP_ENV=production` to disable it.
+- **Health endpoint discloses version and service status** (Finding 8): Acceptable for
+  Phase 1. The version and per-service status aid debugging. Lock it down before public
+  deployment.
+- **CloudWatch logs unencrypted** (Finding 19): Low priority; add KMS key before
+  compliance review.
+- **EvidenceLink and analysis table FK gaps** (L-1, L-2): Polymorphic FK patterns are
+  complex; accepted for Phase 1 with a cleanup note.
+- **Redis pool per health call** (L-5): Functionally correct; the efficiency improvement
+  is not worth Phase 1 scope.
+- **SSR URL localhost issue** (L-6): All pages are currently client components; the issue
+  will only manifest if a server component is added. Not a Phase 1 concern.
+
+**Consequences:**
+
+- Issues #146–#149 must be implemented before any new tickets are addressed. Their
+  implementation prompts exist from the prior session.
+- The IDOR fix (#154) should be treated as a security patch and fast-tracked alongside
+  #146–#149.
+- Terraform tickets (#161–#163) can be batched into a single "infra hardening" PR since
+  they are all in the same modules and touch no application code.
+- The health bugs (#155, #156, #157) are quick wins that can be batched into one PR.
+- The resolution order documented in notes.md section 15 is the recommended sequence.
+
